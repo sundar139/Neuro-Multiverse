@@ -86,7 +86,19 @@ The scientific protocol was committed before any outcome modeling. That ordering
 | `scripts/verify.ps1` | Primary Windows validation entry point |
 | `scripts/verify.sh` | Source validation under WSL2 |
 
-Both run the same gates: Python version, Ruff format, Ruff lint, mypy, pytest, the runtime metadata smoke test, pre-commit across tracked files, an oversized-file scan, a tracked-artifact scan, and a credential scan. Both print a pass/fail summary and exit nonzero on failure. Neither installs packages or mutates an environment — a validator that changes what it validates cannot be trusted.
+Both run the same gates: Python version, Ruff format, Ruff lint, mypy, pytest, the runtime metadata smoke test, pre-commit across tracked files, an oversized-file scan, a tracked-artifact scan, a credential scan, a `git diff --check` gate, and a working-tree stability gate. Both print a pass/fail summary and exit nonzero on failure. Neither installs packages or mutates an environment — a validator that changes what it validates cannot be trusted.
+
+### 5.1 Working-tree stability
+
+Several pre-commit hooks auto-fix files. That is useful during development and dangerous during validation: a run that reformats a file and then reports success is reporting a result it manufactured, and the green summary describes a tree that no longer matches what was reviewed.
+
+Both scripts therefore capture the complete porcelain state, tracked and untracked, before any gate runs, and compare it after the last one. If validation changed anything, the stability gate fails and prints both states. Nothing is reverted automatically — silently undoing a change would hide the same problem from the other direction.
+
+The gate checks that validation *introduced* no change, not that the tree started clean. Running against an intentionally dirty development tree is supported and passes, so long as validation leaves that tree exactly as it found it.
+
+### 5.2 Toolchain alignment
+
+The mypy pre-commit hook is pinned to the same release as the project lock, and its `additional_dependencies` are pinned to exact locked versions. A hook running a different mypy is a hook checking different rules: it can pass while the local gate fails, or fail while the local gate passes, and neither outcome tells you anything about the code. When the mypy pin in `requirements-lock.txt` moves, the hook `rev` and its dependency pins move with it.
 
 ---
 

@@ -133,11 +133,13 @@ The PyTorch wheel index depends on the local NVIDIA driver, so the install comma
 
 - **Authoritative source:** the PyTorch installation selector at <https://pytorch.org/get-started/locally/>, cross-checked against the wheel index at <https://download.pytorch.org/whl/>.
 - **Verification date:** 2026-07-17.
-- **Resolved on this machine:** the CUDA 13.0 index `https://download.pytorch.org/whl/cu130` resolved `torch==2.13.0+cu130` and `torchvision==0.28.0+cu130` for Python 3.11 on Windows. The local driver reports CUDA UMD 13.3, which runs the CUDA 13.0 build.
+- **Resolved on this machine:** the CUDA 13.0 index `https://download.pytorch.org/whl/cu130` resolved `torch==2.13.0+cu130` for Python 3.11 on Windows. The local driver reports CUDA UMD 13.3, which runs the CUDA 13.0 build.
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+.\.venv\Scripts\python.exe -m pip install torch==2.13.0+cu130 --index-url https://download.pytorch.org/whl/cu130
 ```
+
+`torchvision` is deliberately not installed. This project has no computer-vision requirement, no source imports it, and it pulls in Pillow for nothing. Install it only when a concrete implemented need appears.
 
 Re-verify the index against the official source before reinstalling; wheel availability changes over time. The exact resolved versions are recorded in `requirements-gpu-lock.txt`.
 

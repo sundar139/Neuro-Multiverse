@@ -197,22 +197,60 @@ def collect_git_provenance(repo_root: Path | None = None) -> GitProvenance:
 
 
 def collect_torch_provenance() -> TorchProvenance:
-    """Describe PyTorch and CUDA, tolerating an uninstalled PyTorch.
+    """Describe PyTorch and CUDA, tolerating absence and broken installations.
 
     PyTorch is an optional dependency resolved against the local NVIDIA driver.
-    Its absence is a normal state, not a failure.
+    Several distinct states are normal and none may crash the caller:
+
+    * Not installed at all: ``installed`` is False with no error.
+    * Installed and importable: fully described.
+    * Distribution metadata present but import raises. This is the classic
+      broken-CUDA-install shape on Windows, where the wheel is on disk but a
+      dependent DLL fails to load and ``import torch`` raises ``OSError``. The
+      package *is* installed, so ``installed`` stays True and the version is
+      recovered from distribution metadata rather than from the failed import.
+    * Import succeeds but a CUDA query raises.
+
+    Error strings are sanitized to an exception category. Raw exception text is
+    never emitted: on Windows a DLL load failure embeds absolute paths, which
+    would leak the username and home directory into a provenance record that is
+    meant to be shareable.
     """
+    installed_version = _package_version("torch")
+
     try:
         import torch
     except ImportError:
+        # Distinguish "absent" from "present but unimportable". A distribution
+        # can be recorded as installed while its import machinery fails.
+        if installed_version is None:
+            return TorchProvenance(
+                installed=False,
+                version=None,
+                cuda_build=None,
+                cuda_available=None,
+                device_count=None,
+                device_name=None,
+                error=None,
+            )
         return TorchProvenance(
-            installed=False,
-            version=None,
+            installed=True,
+            version=installed_version,
             cuda_build=None,
             cuda_available=None,
             device_count=None,
             device_name=None,
-            error=None,
+            error="torch import failed: ImportError",
+        )
+    except (OSError, RuntimeError) as exc:
+        return TorchProvenance(
+            installed=installed_version is not None,
+            version=installed_version,
+            cuda_build=None,
+            cuda_available=None,
+            device_count=None,
+            device_name=None,
+            error=f"torch import failed: {type(exc).__name__}",
         )
 
     try:

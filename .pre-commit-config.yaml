@@ -50,13 +50,17 @@ repos:
         args: [--fix]
       - id: ruff-format
 
+  # The hook must run the SAME mypy as the project environment. A hook pinned to
+  # a different release silently type-checks with different rules, so a green
+  # hook would not mean the local gate is green. Keep rev and the dependency
+  # pins below in lockstep with requirements-lock.txt.
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.18.2
+    rev: v2.3.0
     hooks:
       - id: mypy
         args: [--config-file=pyproject.toml]
         pass_filenames: false
         additional_dependencies:
-          - types-PyYAML
-          - pydantic>=2.5
-          - pytest>=8
+          - types-PyYAML==6.0.12.20260518
+          - pydantic==2.13.4
+          - pytest==9.1.1

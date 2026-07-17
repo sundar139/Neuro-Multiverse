@@ -1,36 +1,81 @@
 # GPU-enabled PyTorch lock for the NeuroMultiverse analysis environment.
 #
-# This file is separate from requirements-lock.txt because the PyTorch wheel
-# index depends on the local NVIDIA driver and is not resolvable from PyPI.
-# The versions below were read from the environment after a real installation.
-# They are measurements, not estimates.
+# Separate from requirements-lock.txt because the correct PyTorch wheel depends
+# on the local NVIDIA driver and is not resolvable from PyPI. Installing from
+# PyPI yields the CPU-only build, which fails the GPU gate.
 #
-# Resolved and verified on:   2026-07-17
-# Resolver command:
-#     python -m pip install torch torchvision \
+# Every version below was read from the environment after a real installation
+# with `pip show` and `pip list --format=freeze`. They are measurements, not
+# estimates, and no transitive version here was hand-authored.
+#
+# ---------------------------------------------------------------------------
+# Verified installation
+# ---------------------------------------------------------------------------
+# Verification date:            2026-07-17
+# Authoritative wheel index:    https://download.pytorch.org/whl/cu130
+# Python:                       3.11.9 (CPython, Windows x86_64)
+# pip:                          26.1.2
+# Operating system:             Windows 11 Home, build 26200, 64-bit
+# NVIDIA driver (nvidia-smi):   610.47
+# CUDA UMD reported by driver:  13.3
+# torch CUDA build:             13.0
+# Verified GPU:                 NVIDIA GeForce RTX 4070 Laptop GPU
+# torch.cuda.is_available():    True
+# torch.cuda.device_count():    1
+#
+# ---------------------------------------------------------------------------
+# Exact reinstall command
+# ---------------------------------------------------------------------------
+#     python -m pip install torch==2.13.0+cu130 \
 #         --index-url https://download.pytorch.org/whl/cu130
-# Authoritative index:        https://download.pytorch.org/whl/cu130
-# Python:                     3.11.9 (CPython, Windows x86_64)
-# pip:                        26.1.2
-# Operating system:           Windows 11 Home, build 26200, 64-bit
-# NVIDIA driver (nvidia-smi): 610.47
-# CUDA UMD reported by driver: 13.3
-# torch CUDA build:           13.0
-# Verified GPU:               NVIDIA GeForce RTX 4070 Laptop GPU
-# torch.cuda.is_available():  True
 #
-# Reinstall with the index URL above; a bare `pip install -r` against PyPI
-# resolves the CPU-only build instead.
+# The `--index-url` flag is mandatory. A bare `pip install torch` resolves
+# against PyPI and installs a CPU-only build that reports cuda_available False.
+#
+# ---------------------------------------------------------------------------
+# Reverification requirement
+# ---------------------------------------------------------------------------
+# Do NOT treat this file as a permanent fact. Before any future rebuild,
+# reverify against the official PyTorch installation source
+# (https://pytorch.org/get-started/locally/, cross-checked against
+# https://download.pytorch.org/whl/):
+#
+#   * that the cu130 index still publishes a wheel for the target Python;
+#   * that the local NVIDIA driver still satisfies the CUDA build's minimum;
+#   * that the pinned torch version is still available at that index.
+#
+# Wheel availability and CUDA support windows change over time, and a driver
+# upgrade or downgrade can invalidate this pin. Re-read the official command
+# at install time rather than copying the one above blindly.
+#
+# ---------------------------------------------------------------------------
+# Pinned packages
+# ---------------------------------------------------------------------------
+# Only what is required to reproduce the GPU-enabled torch installation.
+# torchvision is deliberately absent: this project has no computer-vision
+# requirement, no tracked source imports it, and it pulled in Pillow for no
+# reason. Both were uninstalled on 2026-07-17.
 
 torch==2.13.0+cu130
-torchvision==0.28.0+cu130
 
-# Direct dependencies pulled in by the PyTorch install, pinned as installed.
+# torch's direct requirements, as reported by `pip show torch`:
+#   filelock, fsspec, jinja2, networkx, setuptools, sympy, typing-extensions
+# Versions below are the installed values.
 filelock==3.30.2
 fsspec==2026.6.0
 Jinja2==3.1.6
-mpmath==1.3.0
 networkx==3.6.1
-pillow==12.2.0
+setuptools==78.1.0
 sympy==1.14.0
 typing_extensions==4.16.0
+
+# Transitive requirements of the above:
+#   MarkupSafe via Jinja2, mpmath via sympy.
+MarkupSafe==3.0.3
+mpmath==1.3.0
+
+# Overlap note: filelock, fsspec, Jinja2, MarkupSafe, and typing_extensions are
+# also pinned in requirements-lock.txt at these same versions, because other
+# project dependencies require them. They are repeated here so this file alone
+# fully describes the GPU installation. networkx, setuptools, sympy, and mpmath
+# enter the environment only through torch and appear in no other lock.

@@ -146,22 +146,128 @@ def test_git_provenance_outside_repository_does_not_raise(tmp_path: Path) -> Non
 
 
 def test_torch_provenance_when_torch_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An uninstalled PyTorch is reported as absent, without an error."""
-    real_import = builtins.__import__
+    """An uninstalled PyTorch is reported as absent, without an error.
 
-    def _blocked_import(name: str, *args: object, **kwargs: object) -> Any:
-        if name == "torch" or name.startswith("torch."):
-            raise ImportError("No module named 'torch'")
-        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.delitem(sys.modules, "torch", raising=False)
-    monkeypatch.setattr(builtins, "__import__", _blocked_import)
+    Genuine absence means both that the import fails AND that no distribution
+    metadata exists. Blocking only the import while metadata is still present
+    describes a broken install, not an absent one; that state is covered
+    separately below.
+    """
+    monkeypatch.setattr(runtime, "_package_version", lambda _name: None)
+    _block_torch_import(monkeypatch, ImportError("No module named 'torch'"))
 
     provenance = runtime.collect_torch_provenance()
     assert provenance["installed"] is False
     assert provenance["version"] is None
     assert provenance["cuda_available"] is None
     assert provenance["error"] is None
+
+
+def _block_torch_import(monkeypatch: pytest.MonkeyPatch, exception: BaseException) -> None:
+    """Make ``import torch`` raise ``exception``, leaving other imports intact."""
+    real_import = builtins.__import__
+
+    def _failing_import(name: str, *args: object, **kwargs: object) -> Any:
+        if name == "torch" or name.startswith("torch."):
+            raise exception
+        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    monkeypatch.setattr(builtins, "__import__", _failing_import)
+
+
+def test_torch_provenance_when_import_raises_os_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A broken install whose import raises OSError stays installed=true.
+
+    This is the Windows DLL-load-failure shape: the distribution is present but
+    a dependent library cannot be loaded.
+    """
+    monkeypatch.setattr(runtime, "_package_version", lambda _name: "2.13.0+cu130")
+    _block_torch_import(
+        monkeypatch,
+        OSError(r"[WinError 126] The specified module could not be found. C:\Users\someone\x.dll"),
+    )
+
+    provenance = runtime.collect_torch_provenance()
+    assert provenance["installed"] is True
+    assert provenance["version"] == "2.13.0+cu130"
+    assert provenance["error"] == "torch import failed: OSError"
+    assert provenance["cuda_available"] is None
+    assert provenance["device_count"] is None
+
+
+def test_torch_provenance_when_import_raises_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken install whose import raises RuntimeError stays installed=true."""
+    monkeypatch.setattr(runtime, "_package_version", lambda _name: "2.13.0+cu130")
+    _block_torch_import(monkeypatch, RuntimeError("numpy ABI mismatch detected"))
+
+    provenance = runtime.collect_torch_provenance()
+    assert provenance["installed"] is True
+    assert provenance["version"] == "2.13.0+cu130"
+    assert provenance["error"] == "torch import failed: RuntimeError"
+    assert provenance["cuda_available"] is None
+
+
+def test_torch_import_failure_does_not_leak_paths_or_usernames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raw exception text never reaches the record.
+
+    A Windows DLL error embeds an absolute path containing the username. The
+    sanitized category must be emitted instead of the message.
+    """
+    dll_path = r"C:\Users\someone\AppData\Local\torch\lib\cudnn64_9.dll"
+    monkeypatch.setattr(runtime, "_package_version", lambda _name: "2.13.0+cu130")
+    _block_torch_import(monkeypatch, OSError(f"[WinError 126] cannot load {dll_path}"))
+
+    encoded = json.dumps(dict(runtime.collect_torch_provenance()))
+    assert dll_path not in encoded
+    assert "someone" not in encoded
+    assert "WinError" not in encoded
+    assert "cudnn64_9.dll" not in encoded
+
+
+def test_torch_import_failure_preserves_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A broken install still produces the stable TorchProvenance schema."""
+    monkeypatch.setattr(runtime, "_package_version", lambda _name: "2.13.0+cu130")
+    _block_torch_import(monkeypatch, OSError("boom"))
+
+    provenance = runtime.collect_torch_provenance()
+    assert set(provenance) == {
+        "installed",
+        "version",
+        "cuda_build",
+        "cuda_available",
+        "device_count",
+        "device_name",
+        "error",
+    }
+
+
+def test_torch_importerror_with_distribution_reports_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ImportError while metadata exists means present but unimportable."""
+    monkeypatch.setattr(runtime, "_package_version", lambda _name: "2.13.0+cu130")
+    _block_torch_import(monkeypatch, ImportError("partially initialized module"))
+
+    provenance = runtime.collect_torch_provenance()
+    assert provenance["installed"] is True
+    assert provenance["version"] == "2.13.0+cu130"
+    assert provenance["error"] == "torch import failed: ImportError"
+
+
+def test_broken_torch_does_not_crash_full_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provenance collection completes even when torch is unimportable."""
+    monkeypatch.setattr(runtime, "_package_version", lambda _name: "2.13.0+cu130")
+    _block_torch_import(monkeypatch, OSError("[WinError 126]"))
+
+    metadata = runtime.collect_runtime_metadata()
+    assert metadata["torch"]["error"] == "torch import failed: OSError"
+    assert metadata["python_version"].startswith("3.11.")
+    assert json.dumps(dict(metadata))
 
 
 def test_package_versions_report_absent_package_as_none() -> None:

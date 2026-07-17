@@ -27,6 +27,27 @@ declare -a gate_names=()
 declare -a gate_results=()
 failures=0
 
+# Capture the complete working-tree state, tracked and untracked, in a stable
+# machine-readable format. Used to prove that validation did not modify the
+# repository: auto-fixing hooks are allowed to run, but a run that changes files
+# and still reports success would be reporting a result it just manufactured.
+git_available=0
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git_available=1
+fi
+
+porcelain_state() {
+    if [ "${git_available}" -ne 1 ]; then
+        return 1
+    fi
+    git status --porcelain=v1 --untracked-files=all 2>/dev/null
+}
+
+initial_state=""
+if [ "${git_available}" -eq 1 ]; then
+    initial_state="$(porcelain_state)"
+fi
+
 run_gate() {
     local name="$1"
     shift
@@ -154,7 +175,56 @@ run_gate 'Runtime metadata' check_runtime_metadata
 run_gate 'Pre-commit' "${python_bin}" -m pre_commit run --all-files
 run_gate 'Oversized files' check_large_files
 run_gate 'Tracked data and model artifacts' check_tracked_artifacts
+check_git_diff() {
+    if [ "${git_available}" -ne 1 ]; then
+        echo "  git not available"
+        return 1
+    fi
+    if ! git diff --check; then
+        echo "  git diff --check reported problems"
+        return 1
+    fi
+    echo "  No whitespace errors or conflict markers in the working diff."
+}
+
+# Must remain the last gate: it compares against the state captured at startup,
+# so every preceding gate has had its chance to modify the tree.
+check_tree_stability() {
+    if [ "${git_available}" -ne 1 ]; then
+        echo "  git not available"
+        return 1
+    fi
+    local final_state
+    final_state="$(porcelain_state)"
+    if [ "${initial_state}" != "${final_state}" ]; then
+        echo "  Validation MODIFIED the working tree. State before:"
+        if [ -z "${initial_state}" ]; then
+            echo "    (clean)"
+        else
+            printf '%s\n' "${initial_state}" | sed 's/^/    /'
+        fi
+        echo "  State after:"
+        if [ -z "${final_state}" ]; then
+            echo "    (clean)"
+        else
+            printf '%s\n' "${final_state}" | sed 's/^/    /'
+        fi
+        echo "  Nothing was reverted automatically. Review and stage or discard as intended."
+        return 1
+    fi
+    # A dirty starting tree is fine; an unchanged dirty tree still passes.
+    if [ -z "${initial_state}" ]; then
+        echo "  Working tree unchanged by validation (started clean)."
+    else
+        local count
+        count="$(printf '%s\n' "${initial_state}" | wc -l | tr -d ' ')"
+        echo "  Working tree unchanged by validation (started dirty, ${count} entr(y/ies))."
+    fi
+}
+
 run_gate 'Credential scan' check_credentials
+run_gate 'Git diff check' check_git_diff
+run_gate 'Working-tree stability' check_tree_stability
 
 echo
 echo "=== Summary ==="

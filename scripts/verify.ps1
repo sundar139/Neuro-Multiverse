@@ -33,6 +33,24 @@ $env:PRE_COMMIT_HOME = Join-Path $repoRoot '.cache\pre-commit'
 
 $script:results = [ordered]@{}
 
+# Capture the complete working-tree state, tracked and untracked, in a stable
+# machine-readable format. Used to prove that validation did not modify the
+# repository: auto-fixing hooks are allowed to run, but a run that changes files
+# and still reports success would be reporting a result it just manufactured.
+function Get-PorcelainState {
+    if (-not $script:gitAvailable) { return $null }
+    $state = & git status --porcelain=v1 --untracked-files=all 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    if ($null -eq $state) { return @() }
+    return @($state)
+}
+
+$script:gitAvailable = $false
+& git rev-parse --is-inside-work-tree *> $null
+if ($LASTEXITCODE -eq 0) { $script:gitAvailable = $true }
+
+$script:initialState = Get-PorcelainState
+
 function Invoke-Gate {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -135,6 +153,38 @@ Invoke-Gate 'Credential scan' {
         throw "$($found.Count) potential credential match(es)"
     }
     Write-Host '  No credential pattern found in tracked files.'
+}
+
+Invoke-Gate 'Git diff check' {
+    if (-not $script:gitAvailable) { throw 'git not available' }
+    & git diff --check
+    if ($LASTEXITCODE -ne 0) { throw 'git diff --check reported problems' }
+    Write-Host '  No whitespace errors or conflict markers in the working diff.'
+}
+
+# Must remain the last gate: it compares against the state captured at startup,
+# so every preceding gate has had its chance to modify the tree.
+Invoke-Gate 'Working-tree stability' {
+    if (-not $script:gitAvailable) { throw 'git not available' }
+    $finalState = Get-PorcelainState
+    if ($null -eq $script:initialState -or $null -eq $finalState) {
+        throw 'could not capture working-tree state'
+    }
+    $before = ($script:initialState -join "`n")
+    $after = ($finalState -join "`n")
+    if ($before -ne $after) {
+        Write-Host '  Validation MODIFIED the working tree. State before:'
+        if ($before -eq '') { Write-Host '    (clean)' }
+        else { $script:initialState | ForEach-Object { Write-Host "    $_" } }
+        Write-Host '  State after:'
+        if ($after -eq '') { Write-Host '    (clean)' }
+        else { $finalState | ForEach-Object { Write-Host "    $_" } }
+        Write-Host '  Nothing was reverted automatically. Review and stage or discard as intended.'
+        throw 'working tree changed during validation'
+    }
+    # A dirty starting tree is fine; an unchanged dirty tree still passes.
+    $descriptor = if ($before -eq '') { 'clean' } else { "dirty, $($script:initialState.Count) entr(y/ies)" }
+    Write-Host "  Working tree unchanged by validation (started $descriptor)."
 }
 
 Write-Host ''

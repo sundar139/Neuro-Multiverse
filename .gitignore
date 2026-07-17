@@ -48,6 +48,13 @@ renv/staging/
 !.vscode/extensions.json
 *.code-workspace
 
+# Agent tool settings are per-user and machine-local.
+# Ignored here rather than only in a global excludes file: a global excludes
+# path configured on Windows is unresolvable to git running inside WSL2, so
+# without this rule the file shows as untracked on the Linux side and a broad
+# `git add` would stage it.
+.claude/settings.local.json
+
 # Research data — never versioned
 data/raw/
 data/derivatives/
