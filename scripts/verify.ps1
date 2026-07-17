@@ -37,12 +37,16 @@ $script:results = [ordered]@{}
 # machine-readable format. Used to prove that validation did not modify the
 # repository: auto-fixing hooks are allowed to run, but a run that changes files
 # and still reports success would be reporting a result it just manufactured.
+# Returns a single newline-joined string, never an array: a PowerShell function
+# returning an empty array unrolls to $null on assignment, which would make a
+# clean tree indistinguishable from a failed capture. A clean tree returns ''.
+# Only a genuine capture failure returns $null.
 function Get-PorcelainState {
     if (-not $script:gitAvailable) { return $null }
     $state = & git status --porcelain=v1 --untracked-files=all 2>$null
     if ($LASTEXITCODE -ne 0) { return $null }
-    if ($null -eq $state) { return @() }
-    return @($state)
+    if ($null -eq $state) { return '' }
+    return (@($state) -join "`n")
 }
 
 $script:gitAvailable = $false
@@ -166,25 +170,29 @@ Invoke-Gate 'Git diff check' {
 # so every preceding gate has had its chance to modify the tree.
 Invoke-Gate 'Working-tree stability' {
     if (-not $script:gitAvailable) { throw 'git not available' }
-    $finalState = Get-PorcelainState
-    if ($null -eq $script:initialState -or $null -eq $finalState) {
+    $before = $script:initialState
+    $after = Get-PorcelainState
+    if ($null -eq $before -or $null -eq $after) {
         throw 'could not capture working-tree state'
     }
-    $before = ($script:initialState -join "`n")
-    $after = ($finalState -join "`n")
     if ($before -ne $after) {
         Write-Host '  Validation MODIFIED the working tree. State before:'
         if ($before -eq '') { Write-Host '    (clean)' }
-        else { $script:initialState | ForEach-Object { Write-Host "    $_" } }
+        else { $before -split "`n" | ForEach-Object { Write-Host "    $_" } }
         Write-Host '  State after:'
         if ($after -eq '') { Write-Host '    (clean)' }
-        else { $finalState | ForEach-Object { Write-Host "    $_" } }
+        else { $after -split "`n" | ForEach-Object { Write-Host "    $_" } }
         Write-Host '  Nothing was reverted automatically. Review and stage or discard as intended.'
         throw 'working tree changed during validation'
     }
     # A dirty starting tree is fine; an unchanged dirty tree still passes.
-    $descriptor = if ($before -eq '') { 'clean' } else { "dirty, $($script:initialState.Count) entr(y/ies)" }
-    Write-Host "  Working tree unchanged by validation (started $descriptor)."
+    if ($before -eq '') {
+        Write-Host '  Working tree unchanged by validation (started clean).'
+    }
+    else {
+        $count = ($before -split "`n").Count
+        Write-Host "  Working tree unchanged by validation (started dirty, $count entr(y/ies))."
+    }
 }
 
 Write-Host ''
