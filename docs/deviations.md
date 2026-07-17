@@ -10,9 +10,11 @@ Any departure from a locked decision in the scientific protocol must be recorded
 
 ## 1. Current state
 
-**No deviations are recorded. The protocol stands exactly as locked on 2026-07-17.**
+**No scientific deviations are currently recorded. The scientific decisions stand as locked on 2026-07-17.**
 
-No outcome, predictive metric, or quality-control result has been produced or inspected, so no deviation is possible at this time.
+No predictive metric, quality-control result, or other research outcome has been produced or inspected. This does not prevent a protocol deviation from occurring: any future departure from a locked decision must still be recorded before it takes effect where possible, regardless of whether outcomes have been inspected.
+
+A deviation may therefore arise at either point in the study. A departure decided before any outcome is inspected is recorded and remains preregistered. A departure decided after outcome inspection is equally recordable, but it is no longer preregistered and is reported as such. In both cases the entry must disclose whether outcomes had already been viewed, per Section 2.
 
 ---
 

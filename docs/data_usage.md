@@ -55,6 +55,7 @@ Every item below must be completed and recorded **before** any download of a giv
 
 - No raw imaging data, derivative imaging, model weight, feature cache, or restricted file may be committed to this repository.
 - No attempt to re-identify any participant is permitted.
-- No dataset characteristic may be recorded in this document unless it was read from an authoritative source and its verification date recorded.
+- No dataset characteristic may be presented as authoritatively verified unless it was read from an authoritative source and its verification date was recorded. Expected characteristics and planning assumptions may appear only when explicitly labeled as unverified or pending authoritative verification, and they must not authorize acquisition.
+- No acquisition may proceed on the basis of an unverified planning assumption. Acquisition requires the completed checklist in Section 2, including license verification, access review, citation verification, and expected-size review read from the authoritative source.
 - No dataset may be acquired to rescue an unfavorable result after outcome inspection; such an acquisition requires a recorded deviation disclosing that outcomes had been viewed.
 - Only aggregate, disclosure-safe outputs may appear in any public report or artifact.
