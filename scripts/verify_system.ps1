@@ -239,23 +239,44 @@ Invoke-Gate 'Windows R 4.6.1 (64-bit)' {
 
 Invoke-Gate 'renv lock synchronized' {
     # Written to a temp file for the same quoting reason as the PyTorch probe.
+    # renv::load activates the project so its library (which carries the
+    # jsonvalidate/V8 schema-validation dependencies) is on the path even when R
+    # is started without loading the project .Rprofile. lockfile_validate is
+    # called with NAMED project/lockfile arguments: the positional single-string
+    # form passes the lockfile as the project and does not validate the schema.
     $src = @'
+suppressPackageStartupMessages(library(renv))
+invisible(renv::load("."))
 lock <- renv::lockfile_read("renv.lock")
 stopifnot(!is.null(lock$Packages$renv))
 stopifnot(lock$R$Version == as.character(getRversion()))
 cat("R", lock$R$Version, "renv", lock$Packages$renv$Version, "\n")
 renv::status(project = ".")
+result <- renv::lockfile_validate(project = ".", lockfile = "renv.lock", error = TRUE, verbose = TRUE)
+stopifnot(isTRUE(result))
+cat("RENV_SCHEMA_VALID\n")
 '@
     $tmp = Join-Path $env:TEMP ('nm_renv_' + [guid]::NewGuid().ToString('N') + '.R')
     [System.IO.File]::WriteAllText($tmp, $src, [System.Text.Encoding]::ASCII)
+    # R writes package and progress messages to stderr. Under
+    # $ErrorActionPreference = 'Stop', merging stderr with 2>&1 makes PowerShell
+    # wrap each stderr line as a terminating error. Relax to 'Continue' for the
+    # capture only; Rscript's exit code, not stderr presence, decides success.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
         $out = (& Rscript $tmp 2>&1 | Out-String)
-        if ($LASTEXITCODE -ne 0) { throw "renv lock unreadable or out of sync with the Windows R runtime" }
+        $code = $LASTEXITCODE
     }
-    finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    finally {
+        $ErrorActionPreference = $prevEAP
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+    if ($code -ne 0) { throw "renv lock unreadable, out of sync, or schema validation failed" }
     if ($out -notmatch 'consistent|No issues') { throw "renv::status did not report a consistent project" }
+    if ($out -notmatch 'RENV_SCHEMA_VALID') { throw "renv::lockfile_validate did not return TRUE" }
     Write-Host "  $(($out -split "`n" | Where-Object { $_ -match '^R\s' } | Select-Object -First 1))"
-    Write-Host "  renv::status reports a consistent project."
+    Write-Host "  renv::status reports a consistent project; schema validation returned TRUE."
 }
 
 Invoke-Gate 'Neuroimaging tools (WSL)' {
@@ -297,8 +318,10 @@ Invoke-Gate 'FreeSurfer license (WSL)' {
 Invoke-Gate 'Git diff check' {
     if (-not $script:gitAvailable) { throw 'git not available' }
     & git diff --check
-    if ($LASTEXITCODE -ne 0) { throw 'git diff --check reported problems' }
-    Write-Host '  no whitespace errors or conflict markers in the working diff.'
+    if ($LASTEXITCODE -ne 0) { throw 'git diff --check (working tree) reported problems' }
+    & git diff --cached --check
+    if ($LASTEXITCODE -ne 0) { throw 'git diff --cached --check (staged) reported problems' }
+    Write-Host '  no whitespace errors or conflict markers in the working-tree or staged diff.'
 }
 
 # Must remain the last gate.

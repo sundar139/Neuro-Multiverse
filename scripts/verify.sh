@@ -181,10 +181,14 @@ check_git_diff() {
         return 1
     fi
     if ! git diff --check; then
-        echo "  git diff --check reported problems"
+        echo "  git diff --check (working tree) reported problems"
         return 1
     fi
-    echo "  No whitespace errors or conflict markers in the working diff."
+    if ! git diff --cached --check; then
+        echo "  git diff --cached --check (staged) reported problems"
+        return 1
+    fi
+    echo "  No whitespace errors or conflict markers in the working-tree or staged diff."
 }
 
 # Must remain the last gate: it compares against the state captured at startup,

@@ -198,6 +198,14 @@ Rscript -e "cat(R.version.string, '\n')"
 Rscript -e "renv::status()"
 ```
 
+Schema validation of the lockfile uses `renv::lockfile_validate` with **named** arguments; the positional single-string form passes the lockfile as the `project` and does not validate the schema:
+
+```powershell
+Rscript -e "invisible(renv::load('.')); stopifnot(isTRUE(renv::lockfile_validate(project='.', lockfile='renv.lock', error=TRUE, verbose=TRUE)))"
+```
+
+`renv::load('.')` puts the project `renv` library — which carries the `jsonvalidate` and `V8` schema-validation packages — on the library path. The full R-environment validity contract (lock readable, R version matches runtime, `renv` record present, status consistent, schema valid) is enforced by `scripts/verify_system.ps1`; see [reproducibility.md](reproducibility.md). The tracked `renv` bootstrap and settings files are covered by pre-commit; only the ignored runtime libraries and caches stay out of version control.
+
 Note: a bare `R` in PowerShell resolves to the `Invoke-History` alias, not the R language. Always use `Rscript`, or `where.exe R`, when testing for R on Windows.
 
 ---

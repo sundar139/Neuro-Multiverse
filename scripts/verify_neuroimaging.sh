@@ -243,8 +243,9 @@ check_license() {
 
 check_git_diff() {
     [ "${git_available}" -eq 1 ] || { echo "  git not available"; return 1; }
-    git diff --check || { echo "  git diff --check reported problems"; return 1; }
-    echo "  no whitespace errors or conflict markers in the working diff"
+    git diff --check || { echo "  git diff --check (working tree) reported problems"; return 1; }
+    git diff --cached --check || { echo "  git diff --cached --check (staged) reported problems"; return 1; }
+    echo "  no whitespace errors or conflict markers in the working-tree or staged diff"
 }
 
 check_tree_stability() {

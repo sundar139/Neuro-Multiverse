@@ -162,8 +162,10 @@ Invoke-Gate 'Credential scan' {
 Invoke-Gate 'Git diff check' {
     if (-not $script:gitAvailable) { throw 'git not available' }
     & git diff --check
-    if ($LASTEXITCODE -ne 0) { throw 'git diff --check reported problems' }
-    Write-Host '  No whitespace errors or conflict markers in the working diff.'
+    if ($LASTEXITCODE -ne 0) { throw 'git diff --check (working tree) reported problems' }
+    & git diff --cached --check
+    if ($LASTEXITCODE -ne 0) { throw 'git diff --cached --check (staged) reported problems' }
+    Write-Host '  No whitespace errors or conflict markers in the working-tree or staged diff.'
 }
 
 # Must remain the last gate: it compares against the state captured at startup,

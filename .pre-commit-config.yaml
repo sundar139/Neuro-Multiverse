@@ -7,7 +7,6 @@
 exclude: |
   (?x)^(
       \.venv/|
-      renv/|
       \.Rproj\.user/|
       data/raw/|
       data/derivatives/|
