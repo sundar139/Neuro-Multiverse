@@ -6,40 +6,67 @@ The pipeline-agreement analysis compares fMRIPrep, FSL, and AFNI on identical ra
 
 ---
 
-## 1. Current state
+## 1. Recorded images
 
-**No container version or digest is recorded, and the container-lock control is incomplete.**
+Two images are pinned. The values below were read from the local images on this
+machine on 2026-07-17 (UTC); they are measurements, not intentions.
 
-Docker Desktop is installed on this machine, but the daemon is not running and WSL2 integration is not enabled for the Ubuntu distribution, so no image could be inspected. No image has been pulled.
+| Tool | Application version | Tag | Architecture | OS |
+| --- | --- | --- | --- | --- |
+| fMRIPrep | 25.2.5 | `nipreps/fmriprep:25.2.5` | amd64 | linux |
+| fMRIPost-AROMA | 0.0.12 | `nipreps/fmripost-aroma:0.0.12` | amd64 | linux |
 
-`fmriprep.version`, `fmripost_aroma.version`, and `checksums.txt` are deliberately absent. Creating them now would mean inventing a version and a digest, which is a fabrication and is prohibited by the protocol. They will be created only when real values can be read from an actual local image.
+Immutable digests:
+
+- `nipreps/fmriprep@sha256:15cbf8dcd17440d26ff5e80e9f7313f1cb3c54f13673f1ec4aed4465e8e12d77`
+- `nipreps/fmripost-aroma@sha256:06388c67ebb8a07b7f9a4ec065e7bcaf7ece0e03cdceee20b4d42a657c338668`
+
+The per-tool detail lives in `fmriprep.version` and `fmripost_aroma.version`; the
+digests are collected in `checksums.txt`. Each version file records the tool, the
+application version, the image reference, the immutable digest, the image ID, the
+architecture, the operating system, the verification date, and the exact
+verification commands.
 
 ## 2. Why digests rather than tags
 
-A tag is a mutable pointer. `nipreps/fmriprep:24.1.1` can be repointed to different content, so a tag records an intention, not an identity. An immutable digest (`sha256:...`) names exact content and is the only pin that supports the reproducibility claim this study needs.
+A tag is a mutable pointer. `nipreps/fmriprep:25.2.5` can be repointed to different
+content, so a tag records an intention, not an identity. An immutable digest
+(`sha256:...`) names exact content and is the only pin that supports the
+reproducibility claim this study needs. Full digests are always recorded: never a
+`latest`/`main`/`unstable` tag, never a shortened or Docker Hub UI-abbreviated
+digest.
 
-## 3. Recording procedure
+## 3. Re-verification
 
-Once Docker is running and an image has been obtained manually:
+The recorded identities are re-checked against the live images by
+`scripts/verify_system.ps1`, which fails if any application version, image ID,
+architecture, operating system, or digest drifts from what the committed lock
+files record. To re-verify by hand:
 
 ```powershell
-docker images --digests
+docker run --rm nipreps/fmriprep:25.2.5 --version
+docker image inspect nipreps/fmriprep:25.2.5 --format '{{.Id}} {{.Architecture}} {{.Os}}'
+docker image inspect nipreps/fmriprep:25.2.5 --format '{{range .RepoDigests}}{{println .}}{{end}}'
 ```
 
-Then record, per tool, in `<tool>.version`:
+Images are pulled deliberately by the user, never automatically by tooling, because
+a pull is a network fetch of several gigabytes with licensing implications.
 
-- Tool name
-- Human-readable version
-- Full image reference
-- Immutable digest
-- Verification date
-- Verification command used
+## 4. ICA-AROMA compatibility
 
-and collect the digests in `checksums.txt`.
+`fMRIPost-AROMA` is locked to the versioned image and full digest above. It is a
+post-processing step over fMRIPrep derivatives, so it requires compatible fMRIPrep
+outputs: any future fMRIPrep run used for ICA-AROMA must write the
+`MNI152NLin6Asym:res-02` standard-space derivatives that AROMA consumes.
 
-Images are pulled deliberately by the user, never automatically by tooling, because a pull is a network fetch of several gigabytes with licensing implications.
+Both fMRIPrep and fMRIPost-AROMA must be invoked with `--notrack` unless telemetry
+has been explicitly approved and recorded, so that no run phones home by default.
 
-## 4. Scope boundary
+ICA-AROMA remains a sensitivity analysis. It is not part of the core 384 universes,
+and no ICA-AROMA execution has occurred: recording these images pins the toolchain,
+it does not run it.
+
+## 5. Scope boundary
 
 This directory records versions. It does not run research preprocessing. Container work directories live on the WSL2 filesystem under the data root, never in this repository and never under `/mnt/c`; see [../docs/setup_windows.md](../docs/setup_windows.md).
 

@@ -1,0 +1,12 @@
+Tool: fMRIPost-AROMA
+Application version: 0.0.12
+Image reference: nipreps/fmripost-aroma:0.0.12
+Immutable digest: nipreps/fmripost-aroma@sha256:06388c67ebb8a07b7f9a4ec065e7bcaf7ece0e03cdceee20b4d42a657c338668
+Image ID: sha256:06388c67ebb8a07b7f9a4ec065e7bcaf7ece0e03cdceee20b4d42a657c338668
+Architecture: amd64
+Operating system: linux
+Verification date: 2026-07-17
+Verification commands:
+  docker run --rm nipreps/fmripost-aroma:0.0.12 --version
+  docker image inspect nipreps/fmripost-aroma:0.0.12 --format '{{.Id}} {{.Architecture}} {{.Os}}'
+  docker image inspect nipreps/fmripost-aroma:0.0.12 --format '{{range .RepoDigests}}{{println .}}{{end}}'

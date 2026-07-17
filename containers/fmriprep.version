@@ -1,0 +1,12 @@
+Tool: fMRIPrep
+Application version: 25.2.5
+Image reference: nipreps/fmriprep:25.2.5
+Immutable digest: nipreps/fmriprep@sha256:15cbf8dcd17440d26ff5e80e9f7313f1cb3c54f13673f1ec4aed4465e8e12d77
+Image ID: sha256:15cbf8dcd17440d26ff5e80e9f7313f1cb3c54f13673f1ec4aed4465e8e12d77
+Architecture: amd64
+Operating system: linux
+Verification date: 2026-07-17
+Verification commands:
+  docker run --rm nipreps/fmriprep:25.2.5 --version
+  docker image inspect nipreps/fmriprep:25.2.5 --format '{{.Id}} {{.Architecture}} {{.Os}}'
+  docker image inspect nipreps/fmriprep:25.2.5 --format '{{range .RepoDigests}}{{println .}}{{end}}'

@@ -1,0 +1,2 @@
+nipreps/fmriprep@sha256:15cbf8dcd17440d26ff5e80e9f7313f1cb3c54f13673f1ec4aed4465e8e12d77
+nipreps/fmripost-aroma@sha256:06388c67ebb8a07b7f9a4ec065e7bcaf7ece0e03cdceee20b4d42a657c338668

@@ -50,23 +50,29 @@ Recorded 2026-07-17. These are **measurements from this machine**, not requireme
 | Windows | Windows 11 Home, build 26200, 64-bit | `Get-CimInstance Win32_OperatingSystem` |
 | CPU | AMD Ryzen 9 8945HS, 8 cores / 16 threads | `Get-CimInstance Win32_Processor` |
 | Memory | ~32 GB total | `Get-CimInstance Win32_OperatingSystem` |
-| Windows free storage | ~545 GB free on `C:` | `Get-CimInstance Win32_LogicalDisk` |
 | Windows Python | 3.11.9 | `py -3.11 --version` |
 | Project environment | `.venv`, Python 3.11.9 | `.venv\Scripts\python.exe --version` |
-| WSL2 | Ubuntu 26.04 LTS, kernel 6.18.33.1, default distribution, version 2 | `wsl --list --verbose` |
-| WSL2 free storage | ~954 GB free on `/` | `df -h /` |
+| WSL2 distribution | Ubuntu 24.04.4 LTS, kernel 6.18.33.1-microsoft-standard-WSL2, default distribution, version 2 | `wsl --list --verbose` |
+| WSL2 processors | 8 logical processors | `wsl -d Ubuntu-24.04 -- nproc` |
+| WSL2 memory | ~23 GiB visible (24 GB configured ceiling) | `wsl -d Ubuntu-24.04 -- free -h` |
+| WSL2 swap | 16 GiB | `wsl -d Ubuntu-24.04 -- swapon --show` |
+| WSL2 free storage | ~928 GB free on `/` | `df -h /` |
 | NVIDIA driver | 610.47, CUDA UMD 13.3 | `nvidia-smi` |
 | GPU | NVIDIA GeForce RTX 4070 Laptop GPU, 8 GB | `nvidia-smi` |
-| GPU from WSL2 | Visible | `wsl -d Ubuntu -- nvidia-smi` |
+| GPU from WSL2 | Visible (NVIDIA-SMI 610.43.02, CUDA UMD 13.3) | `wsl -d Ubuntu-24.04 -- nvidia-smi` |
 | PyTorch | 2.13.0+cu130, CUDA build 13.0, `cuda_available` true | see Section 6 |
-| Docker | Client 29.5.3 installed; daemon not running | `docker version` |
-| Docker from WSL2 | Not integrated | `wsl -d Ubuntu -- docker version` |
-| R / Rscript | Absent on Windows and in WSL2 | `where.exe Rscript` |
-| FSL | Absent in WSL2 | `command -v flirt` |
-| AFNI | Absent in WSL2 | `command -v afni_system_check.py` |
-| FreeSurfer license | Absent | `test -f "$HOME/licenses/license.txt"` |
+| Docker | Client 29.5.3, Engine 29.5.3, Docker Desktop 4.77.0, `linux/amd64` | `docker version` |
+| Docker from WSL2 | Integrated and reachable | `wsl -d Ubuntu-24.04 -- docker version` |
+| Windows R | 4.6.1 (UCRT, 64-bit) | `Rscript --version` |
+| WSL2 R (AFNI) | 4.6.1, `R_LIBS=$HOME/R` | `wsl -d Ubuntu-24.04 -- Rscript --version` |
+| renv | 1.2.3, bare project lock | `Rscript -e "renv::status()"` |
+| FSL | 6.0.7.22 (`$HOME/fsl`) | `wsl -d Ubuntu-24.04 -- cat "$FSLDIR/etc/fslversion"` |
+| AFNI | 26.2.01 (linux_ubuntu_24_64, Jul 6 2026) | `wsl -d Ubuntu-24.04 -- afni -ver` |
+| FreeSurfer license | Present at `$HOME/licenses/license.txt`, mode 600 | `wsl -d Ubuntu-24.04 -- stat -c '%a' "$HOME/licenses/license.txt"` |
 
-Items marked absent are outstanding prerequisites. They are not defects in this repository, and none blocks the Python foundation.
+Ubuntu 24.04 is the approved neuroimaging distribution; no other Ubuntu distribution is used for FSL or AFNI. FSL and AFNI append their bin directories to `PATH` from more than one shell startup file, so the environment can carry duplicate `PATH` entries. This is non-blocking: verification resolves tools by command lookup rather than requiring a unique `PATH` entry.
+
+The whole toolchain is re-verifiable non-destructively with `scripts/verify_system.ps1` (Windows) and `scripts/verify_neuroimaging.sh` (WSL2). Neither installs, upgrades, or reconfigures anything.
 
 ---
 
@@ -158,10 +164,10 @@ Validate:
 ```powershell
 wsl --status
 wsl --list --verbose
-wsl -d Ubuntu -- uname -a
-wsl -d Ubuntu -- bash -lc 'df -h /'
-wsl -d Ubuntu -- bash -lc 'free -h'
-wsl -d Ubuntu -- nvidia-smi
+wsl -d Ubuntu-24.04 -- uname -a
+wsl -d Ubuntu-24.04 -- bash -lc 'df -h /'
+wsl -d Ubuntu-24.04 -- bash -lc 'free -h'
+wsl -d Ubuntu-24.04 -- nvidia-smi
 ```
 
 The distribution must report version 2. The GPU must appear in `nvidia-smi` inside the distribution; this works through the Windows driver, and installing an NVIDIA driver inside WSL2 breaks it.
@@ -173,7 +179,7 @@ The distribution must report version 2. The GPU must appear in `nvidia-smi` insi
 ```powershell
 docker version
 docker info
-wsl -d Ubuntu -- bash -lc 'docker version'
+wsl -d Ubuntu-24.04 -- bash -lc 'docker version'
 ```
 
 The Windows client and the Linux server must both report a version. If the client prints a version but the command then fails to connect, Docker Desktop is installed but not running.
@@ -201,8 +207,8 @@ Note: a bare `R` in PowerShell resolves to the `Invoke-History` alias, not the R
 Both run inside WSL2, not on Windows.
 
 ```powershell
-wsl -d Ubuntu -- bash -lc 'command -v flirt && flirt -version'
-wsl -d Ubuntu -- bash -lc 'command -v afni_system_check.py && afni_system_check.py -check_all'
+wsl -d Ubuntu-24.04 -- bash -lc 'command -v flirt && flirt -version'
+wsl -d Ubuntu-24.04 -- bash -lc 'command -v afni_system_check.py && afni_system_check.py -check_all'
 ```
 
 ---
@@ -244,12 +250,12 @@ Never print, echo, copy into a report, paste into a chat, hash into a public doc
 | GPU driver | `nvidia-smi` | Driver version and GPU listed |
 | GPU in PyTorch | `.\.venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available())"` | `True` |
 | WSL2 | `wsl --list --verbose` | Distribution listed at version 2 |
-| GPU in WSL2 | `wsl -d Ubuntu -- nvidia-smi` | GPU listed |
+| GPU in WSL2 | `wsl -d Ubuntu-24.04 -- nvidia-smi` | GPU listed |
 | Docker | `docker info` | Server section present |
-| Docker in WSL2 | `wsl -d Ubuntu -- bash -lc 'docker version'` | Client and Server both listed |
+| Docker in WSL2 | `wsl -d Ubuntu-24.04 -- bash -lc 'docker version'` | Client and Server both listed |
 | R | `Rscript --version` | R version printed |
 | renv | `Rscript -e "renv::status()"` | Status printed without error |
-| FSL | `wsl -d Ubuntu -- bash -lc 'flirt -version'` | FSL version printed |
-| AFNI | `wsl -d Ubuntu -- bash -lc 'afni_system_check.py -check_all'` | Check summary printed |
-| FreeSurfer license | `wsl -d Ubuntu -- bash -lc 'stat -c "%a %U %G %n" "$HOME/licenses/license.txt"'` | `600` and the owning user |
-| WSL2 storage | `wsl -d Ubuntu -- bash -lc 'df -h /'` | At least 250 GB free before raw processing |
+| FSL | `wsl -d Ubuntu-24.04 -- bash -lc 'flirt -version'` | FSL version printed |
+| AFNI | `wsl -d Ubuntu-24.04 -- bash -lc 'afni_system_check.py -check_all'` | Check summary printed |
+| FreeSurfer license | `wsl -d Ubuntu-24.04 -- bash -lc 'stat -c "%a" "$HOME/licenses/license.txt"'` | `600` |
+| WSL2 storage | `wsl -d Ubuntu-24.04 -- bash -lc 'df -h /'` | At least 250 GB free before raw processing |

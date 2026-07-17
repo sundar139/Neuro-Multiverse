@@ -23,13 +23,13 @@ This project handles secondary human neuroimaging data under data-use agreements
 fMRIPrep requires a FreeSurfer license file. It is licensed material and is treated as a secret.
 
 - Location: `$HOME/licenses/license.txt` inside WSL2 — outside the repository entirely.
-- Permissions: `600`, owner-only.
+- Permissions: `600`, owner-only. Verified present with mode 600 on 2026-07-17.
 - The repository ignore rules exclude `license.txt`. This is defence in depth, not permission to place the file in the working tree.
 - The license contents are never printed, echoed, read aloud, copied into a report, pasted into a chat, hashed into a public document, or committed.
-- Existence and permissions are verified without reading the contents:
+- Existence and permissions are verified without reading the contents. Check the mode only; do not print owner or registration fields:
 
 ```bash
-stat -c "%a %U %G %n" "$HOME/licenses/license.txt"
+stat -c "%a" "$HOME/licenses/license.txt"
 ```
 
 ---
