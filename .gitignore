@@ -9,10 +9,44 @@
 
 # Python environments and caches
 .venv/
+venv/
 __pycache__/
+*.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Coverage and test artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Tool caches
+.cache/
+.pre-commit-cache/
+
+# R and renv
+.Rhistory
+.RData
+.Rproj.user/
+renv/library/
+renv/local/
+renv/cellar/
+renv/lock/
+renv/python/
+renv/sandbox/
+renv/staging/
+
+# IDE-local state that should not be shared
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.code-workspace
 
 # Research data — never versioned
 data/raw/
@@ -24,9 +58,19 @@ scratch/
 results/
 artifacts/
 
+# Neuroimaging working directories and container payloads
+workdir/
+fmriprep_work/
+freesurfer/
+containers/images/
+
 # Imaging, array, and model-weight formats
 *.nii
 *.nii.gz
+*.gii
+*.mgz
+*.mgh
+*.trk
 *.h5
 *.hdf5
 *.npy
@@ -35,6 +79,22 @@ artifacts/
 *.pt
 *.pth
 *.ckpt
+*.onnx
+*.safetensors
+*.joblib
 
-# Redistributable-license text shipped with third-party software
+# Dataset archives
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+
+# Licensed material — never versioned
 license.txt
+
+# WSL and OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+*.Identifier

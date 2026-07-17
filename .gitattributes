@@ -1,0 +1,64 @@
+# Normalize all text to LF in the repository and on checkout.
+# The working tree is shared between Windows and WSL2; shell scripts and
+# container recipes break if they are checked out with CRLF.
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF so they behave under legacy hosts.
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Anything executed by a POSIX shell must be LF.
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.dockerfile text eol=lf
+
+# Neuroimaging volumes and archives: never line-ending converted, never diffed.
+*.nii binary
+*.nii.gz binary
+*.gii binary
+*.mgz binary
+*.mgh binary
+*.trk binary
+
+# Array and tabular container formats.
+*.npy binary
+*.npz binary
+*.h5 binary
+*.hdf5 binary
+*.parquet binary
+*.feather binary
+*.mat binary
+
+# Model weights and checkpoints.
+*.pt binary
+*.pth binary
+*.ckpt binary
+*.onnx binary
+*.safetensors binary
+*.pkl binary
+*.joblib binary
+
+# Images and documents.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+
+# Archives.
+*.gz binary
+*.zip binary
+*.tar binary
+*.tgz binary
+*.7z binary
+*.xz binary
+*.bz2 binary
+
+# Lock files are generated, but their diffs are deliberately NOT suppressed:
+# a dependency version change is exactly what a reviewer must be able to see.
+requirements-lock.txt text eol=lf
+requirements-gpu-lock.txt text eol=lf
+renv.lock text eol=lf

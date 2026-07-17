@@ -1,0 +1,5 @@
+# Development dependency intent for the NeuroMultiverse analysis package.
+# Edit this file, then regenerate requirements-lock.txt with the resolver
+# command recorded in docs/reproducibility.md. Do not hand-edit the lock file.
+
+-e .[dev]

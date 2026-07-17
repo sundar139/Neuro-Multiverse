@@ -1,0 +1,62 @@
+# Pre-commit hooks for the NeuroMultiverse repository.
+# Install once with:  python -m pre_commit install
+# Run across tracked files with:  python -m pre_commit run --all-files
+#
+# Revisions are pinned. Update them deliberately, never automatically.
+
+exclude: |
+  (?x)^(
+      \.venv/|
+      renv/|
+      \.Rproj\.user/|
+      data/raw/|
+      data/derivatives/|
+      data/interim/|
+      data/features/|
+      work/|
+      scratch/|
+      results/|
+      artifacts/|
+      containers/images/|
+      \.cache/|
+      .*\.egg-info/
+  )
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: detect-private-key
+      - id: check-added-large-files
+        # Conservative: nothing in this repository has a legitimate reason to
+        # approach a megabyte. Imaging data belongs outside Git entirely.
+        args: [--maxkb=1024]
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+        exclude: \.(ps1|psm1|bat|cmd)$
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.22
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.18.2
+    hooks:
+      - id: mypy
+        args: [--config-file=pyproject.toml]
+        pass_filenames: false
+        additional_dependencies:
+          - types-PyYAML
+          - pydantic>=2.5
+          - pytest>=8

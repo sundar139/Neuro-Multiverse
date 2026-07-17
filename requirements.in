@@ -1,0 +1,9 @@
+# Runtime dependency intent for the NeuroMultiverse analysis package.
+# Edit this file, then regenerate requirements-lock.txt with the resolver
+# command recorded in docs/reproducibility.md. Do not hand-edit the lock file.
+#
+# GPU-enabled PyTorch is deliberately absent here: its wheel index depends on
+# the local NVIDIA driver and is resolved separately into
+# requirements-gpu-lock.txt.
+
+-e .

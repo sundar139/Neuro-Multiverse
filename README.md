@@ -18,3 +18,9 @@ No dataset has been acquired, no preprocessing has been run, no model has been f
 - [Deviation log](docs/deviations.md) — record of any departure from the locked protocol
 - [Citation inventory](docs/citation_inventory.md) — citation obligations and their verification status
 - [Decision record 0001](docs/decisions/0001-study-design.md) — dataset-role allocation and its rationale
+
+## Development environment
+
+- [Environment setup](docs/setup_windows.md) — Windows and WSL2 split stack, prerequisites, and verification commands
+- [Reproducibility controls](docs/reproducibility.md) — dependency locks, runtime provenance, and verification scripts
+- [Security practices](docs/security.md) — secret, license, and participant-data handling
