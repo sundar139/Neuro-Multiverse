@@ -1,0 +1,40 @@
+# Claude Code project memory
+*.memory.md
+.agent-memory/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python environments and caches
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Research data — never versioned
+data/raw/
+data/derivatives/
+data/interim/
+data/features/
+work/
+scratch/
+results/
+artifacts/
+
+# Imaging, array, and model-weight formats
+*.nii
+*.nii.gz
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.zarr/
+*.pt
+*.pth
+*.ckpt
+
+# Redistributable-license text shipped with third-party software
+license.txt
