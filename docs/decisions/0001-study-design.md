@@ -9,7 +9,7 @@
 
 ## Context
 
-An earlier project blueprint proposed OpenNeuro ds000030 as the principal dataset for the study. Under that proposal, a single moderate-sized, single-site dataset would have carried three distinct scientific loads at once:
+An earlier project blueprint proposed OpenNeuro ds000030 as the principal dataset for the study. ds000030 is a moderate, limited-site clinical cohort and should not simultaneously serve as the large-sample multiverse, the controlled raw-pipeline comparison, and the independent replication cohort. Under the blueprint's proposal, one such dataset would have carried three distinct scientific loads at once:
 
 1. Supplying the statistical power needed to estimate dispersion across a large specification universe
 2. Providing raw imaging inputs for a controlled comparison of independent preprocessing software
@@ -17,11 +17,11 @@ An earlier project blueprint proposed OpenNeuro ds000030 as the principal datase
 
 These three demands are mutually incompatible in one dataset:
 
-- **Power.** Estimating the 90th-minus-10th percentile spread of out-of-sample ROC-AUC across hundreds of specifications, with site-grouped validation, requires many participants distributed across many acquisition sites. A single-site dataset cannot support site-grouped outer validation at all, because there are no sites to group by, and site-restricted permutation becomes undefined.
+- **Power.** Estimating the 90th-minus-10th percentile spread of out-of-sample ROC-AUC across hundreds of specifications, with site-grouped validation, requires many participants distributed across many acquisition sites. A limited-site dataset cannot support five-fold site-grouped outer validation, because there are too few sites to form the required number of disjoint groups, and site-restricted permutation is correspondingly weak. The exact number of imaging sites contributing to ds000030 must be read from the authoritative source and is not assumed here.
 - **Raw-pipeline comparison.** Running fMRIPrep, FSL, and AFNI over identical raw inputs is bounded by preprocessing compute and storage, not by statistical power. It requires raw imaging, which the large derivative collections do not distribute, and it is feasible only at small subject counts under a local-first compute strategy.
-- **Independent replication.** A replication cohort must be independent of the cohort in which the effects were estimated. A dataset cannot replicate itself, and reusing ds000030 for both the pipeline-agreement analysis and the replication would make the replication conditional on the same data, the same site, and the same acquisition protocol.
+- **Independent replication.** A replication cohort must be independent of the cohort in which the effects were estimated. A dataset cannot replicate itself, and reusing ds000030 for both the pipeline-agreement analysis and the replication would make the replication conditional on the same data, the same sites, and the same acquisition protocol.
 
-A dataset used for all three roles would additionally couple every failure mode: a cohort-specific artifact, a site-specific acquisition property, or a single-site demographic skew would propagate into the dispersion estimate, the agreement estimate, and the replication simultaneously, with no independent evidence available to detect it.
+A dataset used for all three roles would additionally couple every failure mode: a cohort-specific artifact, a site-specific acquisition property, or a cohort-specific demographic skew would propagate into the dispersion estimate, the agreement estimate, and the replication simultaneously, with no independent evidence available to detect it.
 
 The conflict was therefore resolved explicitly rather than by silently retaining the blueprint's proposal.
 

@@ -352,7 +352,7 @@ The dataset purchase budget is zero. Any dataset requiring payment is out of sco
 - **Integrity-check strategy.** Content hash per downloaded file, manifest stored outside the repository, re-verified before preprocessing.
 - **Dataset-version recording.** Record the exact dataset version or snapshot identifier reported by the authoritative source at download time.
 - **Citation requirements.** Authoritative verification required before acquisition.
-- **Ethical, privacy, and bias considerations.** Secondary research data. Single-site acquisition limits generalization. Participant counts by diagnosis and demographic composition must be read from the authoritative source rather than assumed.
+- **Ethical, privacy, and bias considerations.** Secondary research data. Limited-site acquisition limits generalization. The number of contributing imaging sites, participant counts by diagnosis, and demographic composition must be read from the authoritative source rather than assumed. Authoritative verification required before acquisition.
 - **Prohibition.** No raw data or derivative imaging may be committed to this repository.
 
 ### 5.4 COBRE NIAK derivative
