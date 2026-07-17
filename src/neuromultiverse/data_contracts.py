@@ -178,6 +178,18 @@ class DatasetAccessRecord(BaseModel):
     citation_ids: Annotated[list[str], Field(min_length=1)]
     target_root: str = Field(min_length=1)
     hash_algorithm: HashAlgorithm = "sha256"
+    # Explicit acquisition-checklist prerequisites, each machine-enforced. They
+    # are separate booleans rather than one "verified" flag so that a single
+    # unmet item cannot be papered over. ``storage_verified`` is only true after
+    # the external directory is provisioned, its path recorded outside Git, and
+    # measured free capacity exceeds the expected acquisition with margin; it is
+    # never inferred from a non-empty ``target_root``.
+    citation_verified: bool
+    size_verified: bool
+    storage_verified: bool
+    hash_strategy_verified: bool
+    # Present (nonblank) exactly when access is gated; ``None`` when READY.
+    required_manual_action: str | None = None
     acquisition_permitted: bool
 
     @model_validator(mode="after")
@@ -206,6 +218,21 @@ class DatasetAccessRecord(BaseModel):
                 "a CONFLICT license cannot be READY; use SOURCE_AMBIGUOUS until reconciled"
             )
 
+        # size_verified is meaningless without an actual size.
+        if self.size_verified and self.expected_size_bytes is None:
+            raise ValueError("size_verified cannot be true while expected_size_bytes is None")
+
+        # required_manual_action must track the access state, not float free of it.
+        blocking = self.access_status is not AccessStatus.READY
+        action = self.required_manual_action
+        if blocking and not (action and action.strip()):
+            raise ValueError(
+                f"access_status {self.access_status.value} is gating and requires a "
+                "nonblank required_manual_action"
+            )
+        if not blocking and action is not None:
+            raise ValueError("a READY dataset must not carry a required_manual_action")
+
         # Acquisition is gated on every prerequisite being verified at once.
         if self.acquisition_permitted:
             if self.access_status is not AccessStatus.READY:
@@ -218,8 +245,22 @@ class DatasetAccessRecord(BaseModel):
                     "acquisition_permitted requires license_status VERIFIED "
                     f"(got {self.license_status.value})"
                 )
+            missing = [
+                name
+                for name, ok in (
+                    ("citation_verified", self.citation_verified),
+                    ("size_verified", self.size_verified),
+                    ("storage_verified", self.storage_verified),
+                    ("hash_strategy_verified", self.hash_strategy_verified),
+                )
+                if not ok
+            ]
+            if missing:
+                raise ValueError(f"acquisition_permitted requires all prerequisites: {missing}")
             if self.expected_size_bytes is None:
                 raise ValueError("acquisition_permitted requires a verified expected_size_bytes")
+            if self.required_manual_action is not None:
+                raise ValueError("acquisition_permitted requires required_manual_action is None")
         return self
 
 

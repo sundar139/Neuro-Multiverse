@@ -63,6 +63,16 @@ VERIFICATION_DATE = date(2026, 7, 17)
 # Optional datasets that must never be authorized for acquisition here.
 OPTIONAL_IDS = frozenset({"cobre_raw", "aomic_id1000"})
 
+# Planning-scope controls for ds000030. These are NOT participant selections.
+# The next acquisition unit is a bounded five-subject pilot; the planned
+# controlled RQ5 subset is ~20 subjects, reached only after the pilot gates pass.
+DS000030_PILOT_SUBJECT_COUNT = 5
+DS000030_PLANNED_RQ5_SUBJECT_COUNT = 20
+
+# External hash-manifest evidence a dataset must reference to claim a verified
+# hash strategy. The manifest itself is created outside Git at acquisition.
+HASH_MANIFEST_BASENAME = "checksums.sha256"
+
 # The exact citation DOI required for each verified citation-inventory topic.
 REQUIRED_CITATION_DOIS = {
     "Preprocessed Connectomes Project ABIDE derivatives": "10.3389/conf.fninf.2013.09.00041",
@@ -128,7 +138,11 @@ def required_records() -> list[DatasetAccessRecord]:
             approval_required=False,
             redistribution_allowed=False,
             commercial_use_allowed=False,
-            provider_reidentification_restricted=True,
+            # The published usage-agreement page states the data are anonymized
+            # and contain no PHI, but does not state an explicit contractual
+            # re-identification clause. Anonymization is not that clause, so this
+            # provider fact is False; the project's own prohibition is separate.
+            provider_reidentification_restricted=False,
             expected_size_bytes=None,
             expected_size_source=(
                 "FCP-INDI S3 object listing at acquisition; phenotypic file "
@@ -138,6 +152,14 @@ def required_records() -> list[DatasetAccessRecord]:
             citation_ids=["ABIDE-I", "Preprocessed Connectomes Project ABIDE derivatives"],
             target_root=f"{DATA_ROOT}/abide_i_pcp",
             hash_algorithm="sha256",
+            citation_verified=True,
+            size_verified=False,
+            storage_verified=False,
+            hash_strategy_verified=True,
+            required_manual_action=(
+                "Register a NITRC account and join the 1000 Functional Connectomes "
+                "Project / INDI resource, then be logged in at download time."
+            ),
             acquisition_permitted=False,
         ),
         DatasetAccessRecord(
@@ -165,13 +187,22 @@ def required_records() -> list[DatasetAccessRecord]:
             provider_reidentification_restricted=False,
             expected_size_bytes=85127263296,
             expected_size_source=(
-                "OpenNeuro GraphQL snapshot size for tag 1.0.0 (full dataset); the "
-                "pilot subset of 20 subjects is computed from per-file snapshot metadata"
+                "OpenNeuro GraphQL snapshot size for tag 1.0.0 (full snapshot). The "
+                f"whole snapshot is NOT acquired: the next unit is a bounded "
+                f"{DS000030_PILOT_SUBJECT_COUNT}-subject pilot whose size is computed "
+                "from per-file snapshot metadata for the selected subjects before download; "
+                f"the planned controlled RQ5 subset is ~{DS000030_PLANNED_RQ5_SUBJECT_COUNT} "
+                "subjects, reached only after the pilot gates pass."
             ),
             verification_date=VERIFICATION_DATE,
             citation_ids=["OpenNeuro ds000030"],
             target_root=f"{DATA_ROOT}/ds000030",
             hash_algorithm="sha256",
+            citation_verified=True,
+            size_verified=True,
+            storage_verified=False,
+            hash_strategy_verified=True,
+            required_manual_action=None,
             acquisition_permitted=False,
         ),
         DatasetAccessRecord(
@@ -210,6 +241,14 @@ def required_records() -> list[DatasetAccessRecord]:
             citation_ids=["COBRE", "NIAK COBRE derivative release"],
             target_root=f"{DATA_ROOT}/cobre_niak",
             hash_algorithm="sha256",
+            citation_verified=True,
+            size_verified=True,
+            storage_verified=False,
+            hash_strategy_verified=True,
+            required_manual_action=(
+                "Obtain written clarification from the derivative publisher on the "
+                "figshare CC BY 4.0 vs upstream COBRE CC BY-NC layered-license conflict."
+            ),
             acquisition_permitted=False,
         ),
     ]
@@ -316,9 +355,29 @@ def check(records: list[DatasetAccessRecord]) -> list[str]:
                     f"{rid}: snapshot DOI must be a valid versioned OpenNeuro DOI for v{version}"
                 )
 
+        # Explicit prerequisite consistency.
+        if record.citation_verified and any(c not in verified_topics for c in record.citation_ids):
+            problems.append(f"{rid}: citation_verified=true but a citation id is not Verified")
+        if record.size_verified and record.expected_size_bytes is None:
+            problems.append(f"{rid}: size_verified=true but expected_size_bytes is absent")
+        if record.hash_strategy_verified and record.hash_algorithm not in ("sha256", "sha512"):
+            problems.append(f"{rid}: hash_strategy_verified=true but hash_algorithm unsupported")
+        if record.storage_verified and not _register_documents_capacity(rid):
+            problems.append(
+                f"{rid}: storage_verified=true without documented capacity evidence in the register"
+            )
+        # ABIDE-specific: the published usage agreement has no explicit provider
+        # re-identification clause, so this provider fact must stay False.
+        if rid == "abide_i_pcp" and record.provider_reidentification_restricted:
+            problems.append(
+                f"{rid}: provider_reidentification_restricted=true without a verified explicit "
+                "provider re-identification clause"
+            )
+
     problems.extend(_check_citation_dois())
     problems.extend(_check_false_attribution())
     problems.extend(_check_manual_actions(records))
+    problems.extend(_check_pilot_scope())
     problems.extend(_check_template())
     return problems
 
@@ -366,20 +425,109 @@ def _check_false_attribution() -> list[str]:
     return problems
 
 
+# Explicit dataset -> register heading substring. No fuzzy first-word matching:
+# each dataset is mapped to the exact heading fragment of its register section.
+REGISTER_SECTION_KEY = {
+    "abide_i_pcp": "ABIDE-I Preprocessed Connectomes Project derivatives",
+    "ds000030": "OpenNeuro ds000030",
+    "cobre_niak": "COBRE NIAK derivative",
+}
+
+
+def _register_sections() -> dict[str, str]:
+    """Split the acquisition register into ``## heading -> body`` sections."""
+    sections: dict[str, str] = {}
+    heading: str | None = None
+    buffer: list[str] = []
+    for line in ACQUISITION_REGISTER.read_text(encoding="utf-8").splitlines():
+        if line.startswith("## "):
+            if heading is not None:
+                sections[heading] = "\n".join(buffer)
+            heading = line[3:].strip()
+            buffer = []
+        else:
+            buffer.append(line)
+    if heading is not None:
+        sections[heading] = "\n".join(buffer)
+    return sections
+
+
+def _section_for(dataset_id: str, sections: dict[str, str]) -> str | None:
+    key = REGISTER_SECTION_KEY.get(dataset_id)
+    if key is None:
+        return None
+    for heading, body in sections.items():
+        if key in heading:
+            return body
+    return None
+
+
+def _register_documents_capacity(dataset_id: str) -> bool:
+    """Whether the register section records measured storage capacity evidence."""
+    body = _section_for(dataset_id, _register_sections())
+    if body is None:
+        return False
+    return "capacity" in body.lower() and "measured" in body.lower()
+
+
 def _check_manual_actions(records: list[DatasetAccessRecord]) -> list[str]:
-    """A gating access state requires a documented manual action."""
+    """Structured per-record cross-check of manual actions against the register.
+
+    The decision is driven by the typed ``required_manual_action`` field, not a
+    document-wide substring search. Each blocked dataset's register section must
+    state its exact access-status value and carry a manual-action line; a READY
+    section must not present a required authorization action.
+    """
     problems: list[str] = []
-    register = ACQUISITION_REGISTER.read_text(encoding="utf-8").lower()
+    sections = _register_sections()
     for record in records:
+        rid = record.dataset_id
+        body = _section_for(rid, sections)
+        if body is None:
+            problems.append(f"{rid}: no acquisition-register section found")
+            continue
+        lower = body.lower()
         if record.access_status in _BLOCKING_STATES:
-            has_action = (
-                "required manual" in register
-                and record.dataset_id.replace("_", " ").split()[0] in register
-            )
-            if not has_action:
+            if record.access_status.value not in body:
                 problems.append(
-                    f"{record.dataset_id}: blocking status {record.access_status.value} "
-                    "has no documented required manual action in the acquisition register"
+                    f"{rid}: register section omits the exact access status "
+                    f"{record.access_status.value}"
+                )
+            if "required manual authorization:" not in lower and "manual action" not in lower:
+                problems.append(f"{rid}: blocked dataset lacks a manual-action line in its section")
+        elif "required manual authorization:" in lower:
+            problems.append(
+                f"{rid}: READY dataset must not present a required authorization action"
+            )
+    return problems
+
+
+_PILOT_CONFLATE_RE = re.compile(
+    r"(?i)"
+    r"20[\s-]*subject[s]?\s+pilot"  # "20-subject pilot"
+    r"|pilot\s+(?:of|with|uses|is|=|:|contains|has)\s+(?:approximately\s+|about\s+|~)?20\b"
+)
+
+
+def line_conflates_pilot(line: str) -> bool:
+    """Whether a line calls the ~20-subject RQ5 set a pilot (a conflation)."""
+    return bool(_PILOT_CONFLATE_RE.search(line))
+
+
+def _check_pilot_scope() -> list[str]:
+    """The five-subject pilot and ~20-subject RQ5 subset must stay distinct."""
+    problems: list[str] = []
+    if DS000030_PILOT_SUBJECT_COUNT != 5:
+        problems.append("pilot subject count must be 5")
+    if DS000030_PLANNED_RQ5_SUBJECT_COUNT != 20:
+        problems.append("planned controlled RQ5 subject count must be 20")
+    if DS000030_PILOT_SUBJECT_COUNT == DS000030_PLANNED_RQ5_SUBJECT_COUNT:
+        problems.append("pilot and planned RQ5 counts must be distinct")
+    for doc in (DATA_USAGE, ACQUISITION_REGISTER):
+        for i, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), start=1):
+            if line_conflates_pilot(line):
+                problems.append(
+                    f"{doc.name}:{i}: the ~20-subject RQ5 set must not be called a pilot"
                 )
     return problems
 
@@ -416,10 +564,19 @@ def main() -> int:
                 "license_status": r.license_status.value,
                 "repository_license_id": r.repository_license_id,
                 "upstream_license_ids": r.upstream_license_ids,
+                "prerequisites": {
+                    "citation_verified": r.citation_verified,
+                    "size_verified": r.size_verified,
+                    "storage_verified": r.storage_verified,
+                    "hash_strategy_verified": r.hash_strategy_verified,
+                },
+                "required_manual_action_present": r.required_manual_action is not None,
                 "acquisition_permitted": r.acquisition_permitted,
             }
             for r in records
         ],
+        "pilot_subject_count": DS000030_PILOT_SUBJECT_COUNT,
+        "planned_rq5_subject_count": DS000030_PLANNED_RQ5_SUBJECT_COUNT,
         "problem_count": len(problems),
         "problems": problems,
     }

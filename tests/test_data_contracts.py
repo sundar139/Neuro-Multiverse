@@ -58,6 +58,11 @@ def _access_kwargs(**overrides: Any) -> dict[str, Any]:
         "citation_ids": ["synthetic-cite"],
         "target_root": "$HOME/neuromultiverse-data/synthetic",
         "hash_algorithm": "sha256",
+        "citation_verified": True,
+        "size_verified": True,
+        "storage_verified": True,
+        "hash_strategy_verified": True,
+        "required_manual_action": None,
         "acquisition_permitted": False,
     }
     base.update(overrides)
@@ -126,6 +131,7 @@ def test_acquisition_cannot_be_permitted_while_pending() -> None:
         DatasetAccessRecord(
             **_access_kwargs(
                 access_status=AccessStatus.AUTHORIZATION_PENDING,
+                required_manual_action="await approval",
                 acquisition_permitted=True,
             )
         )
@@ -136,9 +142,53 @@ def test_permitted_requires_verified_size() -> None:
         DatasetAccessRecord(**_access_kwargs(acquisition_permitted=True, expected_size_bytes=None))
 
 
-def test_permitted_ready_with_size_is_allowed() -> None:
+def test_permitted_ready_with_all_prerequisites_is_allowed() -> None:
     record = DatasetAccessRecord(**_access_kwargs(acquisition_permitted=True))
     assert record.acquisition_permitted is True
+
+
+def test_citation_verified_false_blocks_acquisition() -> None:
+    with pytest.raises(ValidationError, match="prerequisites"):
+        DatasetAccessRecord(**_access_kwargs(acquisition_permitted=True, citation_verified=False))
+
+
+def test_size_verified_false_blocks_acquisition() -> None:
+    with pytest.raises(ValidationError, match="prerequisites"):
+        DatasetAccessRecord(**_access_kwargs(acquisition_permitted=True, size_verified=False))
+
+
+def test_storage_verified_false_blocks_acquisition() -> None:
+    with pytest.raises(ValidationError, match="prerequisites"):
+        DatasetAccessRecord(**_access_kwargs(acquisition_permitted=True, storage_verified=False))
+
+
+def test_hash_strategy_verified_false_blocks_acquisition() -> None:
+    with pytest.raises(ValidationError, match="prerequisites"):
+        DatasetAccessRecord(
+            **_access_kwargs(acquisition_permitted=True, hash_strategy_verified=False)
+        )
+
+
+def test_size_verified_requires_expected_size() -> None:
+    with pytest.raises(ValidationError, match="size_verified"):
+        DatasetAccessRecord(**_access_kwargs(size_verified=True, expected_size_bytes=None))
+
+
+def test_blocked_status_requires_manual_action() -> None:
+    with pytest.raises(ValidationError, match="required_manual_action"):
+        DatasetAccessRecord(
+            **_access_kwargs(
+                access_status=AccessStatus.MANUAL_AUTHORIZATION_REQUIRED,
+                required_manual_action=None,
+            )
+        )
+
+
+def test_ready_rejects_manual_action() -> None:
+    with pytest.raises(ValidationError, match="must not carry a required_manual_action"):
+        DatasetAccessRecord(
+            **_access_kwargs(access_status=AccessStatus.READY, required_manual_action="do a thing")
+        )
 
 
 def test_conflict_license_cannot_be_ready() -> None:
@@ -156,6 +206,7 @@ def test_conflict_license_blocks_acquisition() -> None:
             **_access_kwargs(
                 license_status=LicenseStatus.CONFLICT,
                 access_status=AccessStatus.SOURCE_AMBIGUOUS,
+                required_manual_action="clarify license",
                 acquisition_permitted=True,
             )
         )
@@ -167,6 +218,7 @@ def test_source_ambiguous_blocks_acquisition() -> None:
             **_access_kwargs(
                 access_status=AccessStatus.SOURCE_AMBIGUOUS,
                 license_status=LicenseStatus.CONFLICT,
+                required_manual_action="clarify license",
                 acquisition_permitted=True,
             )
         )
@@ -190,6 +242,7 @@ def test_layered_licenses_accepted_when_conflict() -> None:
             commercial_use_allowed=False,
             redistribution_allowed=False,
             effective_use_restrictions=["no_commercial_use", "no_redistribution"],
+            required_manual_action="obtain license clarification",
         )
     )
     assert record.license_status is LicenseStatus.CONFLICT
@@ -387,3 +440,32 @@ def test_no_fixture_resembles_real_participant_id() -> None:
     for subject_id in ("SYNTH-0001", "SYNTH-0002"):
         assert subject_id.startswith("SYNTH-")
         assert not any(shape.match(subject_id) for shape in real_shapes)
+
+
+def _load_governance_validator() -> Any:
+    """Load the governance validator script as a module for pure-helper tests."""
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "verify_data_governance.py"
+    spec = importlib.util.spec_from_file_location("verify_data_governance", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_pilot_and_rq5_counts_are_five_and_twenty_and_distinct() -> None:
+    gov = _load_governance_validator()
+    assert gov.DS000030_PILOT_SUBJECT_COUNT == 5
+    assert gov.DS000030_PLANNED_RQ5_SUBJECT_COUNT == 20
+    assert gov.DS000030_PILOT_SUBJECT_COUNT != gov.DS000030_PLANNED_RQ5_SUBJECT_COUNT
+
+
+def test_pilot_final_conflation_is_detected() -> None:
+    gov = _load_governance_validator()
+    assert gov.line_conflates_pilot("The 20-subject pilot is acquired first")
+    assert gov.line_conflates_pilot("the pilot uses 20 subjects")
+    assert not gov.line_conflates_pilot("The 5-subject pilot precedes the ~20-subject RQ5 subset")
+    assert not gov.line_conflates_pilot(
+        "planned controlled RQ5 subset is approximately 20 subjects"
+    )
