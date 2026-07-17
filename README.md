@@ -14,6 +14,7 @@ No dataset has been acquired, no preprocessing has been run, no model has been f
 
 - [Scientific protocol](docs/preregistration.md) — the scientific source of truth
 - [Data usage and governance](docs/data_usage.md) — dataset roles, terms, and acquisition prerequisites
+- [Acquisition register](docs/acquisition_register.md) — per-dataset access status, verified terms, and the acquisition gate
 - [Computational budget](docs/computational_budget.md) — compute, storage, and spending controls
 - [Deviation log](docs/deviations.md) — record of any departure from the locked protocol
 - [Citation inventory](docs/citation_inventory.md) — citation obligations and their verification status
