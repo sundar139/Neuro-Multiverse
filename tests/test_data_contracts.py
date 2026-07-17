@@ -22,8 +22,10 @@ from neuromultiverse.data_contracts import (
     AcquisitionEvent,
     DatasetAccessRecord,
     DatasetRole,
+    LicenseStatus,
     SubjectManifest,
     SubjectManifestRecord,
+    openneuro_doi_is_valid,
 )
 
 _TEMPLATE = (
@@ -40,12 +42,16 @@ def _access_kwargs(**overrides: Any) -> dict[str, Any]:
         "authoritative_sources": ["https://example.org/synthetic"],
         "version": "1.0.0",
         "license_id": "CC0",
+        "license_status": LicenseStatus.VERIFIED,
+        "repository_license_id": "CC0",
+        "upstream_license_ids": [],
+        "effective_use_restrictions": [],
         "access_status": AccessStatus.READY,
         "registration_required": False,
         "approval_required": False,
         "redistribution_allowed": True,
         "commercial_use_allowed": True,
-        "reidentification_prohibited": True,
+        "provider_reidentification_restricted": False,
         "expected_size_bytes": 1024,
         "expected_size_source": "provider metadata API",
         "verification_date": date(2026, 7, 17),
@@ -133,6 +139,116 @@ def test_permitted_requires_verified_size() -> None:
 def test_permitted_ready_with_size_is_allowed() -> None:
     record = DatasetAccessRecord(**_access_kwargs(acquisition_permitted=True))
     assert record.acquisition_permitted is True
+
+
+def test_conflict_license_cannot_be_ready() -> None:
+    with pytest.raises(ValidationError, match="CONFLICT license cannot be READY"):
+        DatasetAccessRecord(
+            **_access_kwargs(
+                license_status=LicenseStatus.CONFLICT, access_status=AccessStatus.READY
+            )
+        )
+
+
+def test_conflict_license_blocks_acquisition() -> None:
+    with pytest.raises(ValidationError):
+        DatasetAccessRecord(
+            **_access_kwargs(
+                license_status=LicenseStatus.CONFLICT,
+                access_status=AccessStatus.SOURCE_AMBIGUOUS,
+                acquisition_permitted=True,
+            )
+        )
+
+
+def test_source_ambiguous_blocks_acquisition() -> None:
+    with pytest.raises(ValidationError, match="access_status is READY"):
+        DatasetAccessRecord(
+            **_access_kwargs(
+                access_status=AccessStatus.SOURCE_AMBIGUOUS,
+                license_status=LicenseStatus.CONFLICT,
+                acquisition_permitted=True,
+            )
+        )
+
+
+def test_unverified_license_blocks_acquisition() -> None:
+    with pytest.raises(ValidationError, match="license_status VERIFIED"):
+        DatasetAccessRecord(
+            **_access_kwargs(license_status=LicenseStatus.UNVERIFIED, acquisition_permitted=True)
+        )
+
+
+def test_layered_licenses_accepted_when_conflict() -> None:
+    record = DatasetAccessRecord(
+        **_access_kwargs(
+            license_id="AMBIGUOUS: CC BY 4.0 vs CC BY-NC",
+            license_status=LicenseStatus.CONFLICT,
+            repository_license_id="CC BY 4.0",
+            upstream_license_ids=["CC BY-NC"],
+            access_status=AccessStatus.SOURCE_AMBIGUOUS,
+            commercial_use_allowed=False,
+            redistribution_allowed=False,
+            effective_use_restrictions=["no_commercial_use", "no_redistribution"],
+        )
+    )
+    assert record.license_status is LicenseStatus.CONFLICT
+    assert record.upstream_license_ids == ["CC BY-NC"]
+
+
+def test_noncommercial_restriction_forces_flag() -> None:
+    with pytest.raises(ValidationError, match="no_commercial_use"):
+        DatasetAccessRecord(
+            **_access_kwargs(
+                effective_use_restrictions=["no_commercial_use"],
+                commercial_use_allowed=True,
+            )
+        )
+
+
+def test_no_redistribution_restriction_forces_flag() -> None:
+    with pytest.raises(ValidationError, match="no_redistribution"):
+        DatasetAccessRecord(
+            **_access_kwargs(
+                effective_use_restrictions=["no_redistribution"],
+                redistribution_allowed=True,
+            )
+        )
+
+
+def test_unknown_use_restriction_rejected() -> None:
+    with pytest.raises(ValidationError, match="unknown effective_use_restrictions"):
+        DatasetAccessRecord(**_access_kwargs(effective_use_restrictions=["make_it_public"]))
+
+
+def test_provider_reid_flag_is_distinct_from_project_rule() -> None:
+    """provider_reidentification_restricted describes the source, not the project.
+
+    A permissive-licensed dataset can legitimately set it False; the project's
+    own prohibition is unconditional and lives in the protocol, not this flag.
+    """
+    record = DatasetAccessRecord(**_access_kwargs(provider_reidentification_restricted=False))
+    assert record.provider_reidentification_restricted is False
+
+
+def test_openneuro_doi_valid() -> None:
+    assert openneuro_doi_is_valid("10.18112/openneuro.ds000030.v1.0.0", "ds000030", "1.0.0")
+
+
+def test_openneuro_doi_version_mismatch_rejected() -> None:
+    assert not openneuro_doi_is_valid("10.18112/openneuro.ds000030.v1.0.1", "ds000030", "1.0.0")
+
+
+def test_openneuro_doi_unversioned_rejected() -> None:
+    assert not openneuro_doi_is_valid("10.18112/openneuro.ds000030", "ds000030", "1.0.0")
+
+
+def test_openneuro_doi_malformed_rejected() -> None:
+    assert not openneuro_doi_is_valid("10.18112/openneuro.ds0000300.2", "ds000030", "1.0.0")
+
+
+def test_openneuro_doi_accession_mismatch_rejected() -> None:
+    assert not openneuro_doi_is_valid("10.18112/openneuro.ds000031.v1.0.0", "ds000030", "1.0.0")
 
 
 def test_negative_size_fails() -> None:

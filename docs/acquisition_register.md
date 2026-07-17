@@ -18,7 +18,8 @@ The external data root is portable and is expressed as `$HOME/neuromultiverse-da
 - **Scientific role:** Main large-N multiverse and primary model comparison (RQ1-RQ4).
 - **Selected version:** ABIDE-I PCP derivatives; phenotypic table `Phenotypic_V1_0b_preprocessed1`. Pipelines `ccs`, `cpac`, `dparsf`, `niak`; strategies `filt_global`, `filt_noglobal`, `nofilt_global`, `nofilt_noglobal`; ROI atlases include `rois_aal` and `rois_cc200`.
 - **Authoritative sources:** INDI ABIDE-I data-usage page (`fcon_1000.projects.nitrc.org/indi/abide/abide_I.html`); PCP ABIDE (`preprocessed-connectomes-project.github.io/abide/`); FCP-INDI public S3 bucket (`s3://fcp-indi/data/Projects/ABIDE_Initiative/Outputs/`).
-- **License / data-use summary:** Creative Commons Attribution-NonCommercial-Share Alike (CC BY-NC-SA 3.0). Non-commercial research use only; share-alike on redistribution; anonymized per HIPAA; re-identification prohibited.
+- **Provider terms:** Creative Commons Attribution-NonCommercial-Share Alike (CC BY-NC-SA 3.0). The provider states the data are anonymized (HIPAA) and contain no protected health information, requires non-commercial use, attribution and share-alike on redistribution, and NITRC/FCP registration; the provider also prohibits re-identification of the anonymized data.
+- **Project standing prohibition:** Independently of provider terms, the NeuroMultiverse protocol prohibits any re-identification attempt, forbids public redistribution of participant-level data, keeps no participant-level file in Git, and permits only secondary research and disclosure-safe aggregate outputs.
 - **Citation obligations:** ABIDE-I — Di Martino et al. 2014 (DOI 10.1038/mp.2013.78). PCP derivatives — Craddock et al. 2013, The Neuro Bureau Preprocessing Initiative (DOI 10.3389/conf.fninf.2013.09.00041). Both are recorded and Verified in the citation inventory and must both be cited.
 - **Access status:** MANUAL AUTHORIZATION REQUIRED. The derivative objects are readable from the public FCP-INDI S3 bucket, but the governing ABIDE-I terms still require registration and acceptance; public object-store reachability does not remove them.
 - **Required manual authorization:** Create or sign into a NITRC account; join the 1000 Functional Connectomes Project / INDI resource; be logged in and in compliance with CC BY-NC-SA at download time.
@@ -28,8 +29,8 @@ The external data root is portable and is expressed as `$HOME/neuromultiverse-da
 - **Hash algorithm:** SHA-256
 - **External hash-manifest location:** `$HOME/neuromultiverse-data/abide_i_pcp/checksums.sha256` (created at acquisition, never committed)
 - **Re-verification command:** `curl -s "https://s3.amazonaws.com/fcp-indi?list-type=2&prefix=data/Projects/ABIDE_Initiative/Outputs/&delimiter=/"` (object listing, metadata only)
-- **Redistribution policy:** Not redistributed by this project; share-alike terms apply if it ever were.
-- **Re-identification prohibition:** No re-identification attempt permitted.
+- **Redistribution policy:** Not redistributed by this project; the provider's share-alike terms would apply if it ever were.
+- **Re-identification:** Prohibited both by provider terms and, independently, by the project protocol.
 - **Approval status:** Pending independent approval of this governance record.
 - **Approval date:** Not approved.
 - **Acquisition permitted:** No.
@@ -68,22 +69,27 @@ The external data root is portable and is expressed as `$HOME/neuromultiverse-da
 - **Scientific role:** Independent schizophrenia replication (Estimand 4).
 - **Selected version:** COBRE preprocessed with NIAK 0.17 - lightweight release, DOI `10.6084/m9.figshare.4197885.v1`.
 - **Authoritative sources:** figshare article 4197885 page and API (`api.figshare.com/v2/articles/4197885`); SIMEXP `cobre_preprocessed` project.
-- **License / data-use summary:** CC BY 4.0, read from the figshare article metadata. Attribution required; no registration for the derivative. The underlying COBRE acknowledgment (NIH COBRE grant 1P20RR021938; Mind Research Network / University of New Mexico) is honored.
+- **Repository-displayed license:** CC BY 4.0 (figshare article `license` field).
+- **Upstream-data license:** Attribution-NonCommercial (CC BY-NC) — the figshare description itself states the data were "originally released under Creative Commons -- Attribution Non-Commercial" (upstream INDI COBRE).
+- **License verification status:** **CONFLICT.** The repository license (CC BY 4.0) is more permissive than the stated upstream license (CC BY-NC). This is not resolved by selecting the less restrictive term.
+- **Effective project restriction (conservative):** Non-commercial, no redistribution, attribution required, until the conflict is authoritatively reconciled.
 - **Citation obligations:** NIAK derivative — Bellec 2016 (figshare DOI above). COBRE — Aine et al. 2017 (DOI 10.1007/s12021-017-9338-9). Both are recorded and Verified in the citation inventory.
-- **Access status:** READY. Public figshare download; no authentication required.
-- **Required manual authorization:** None for the NIAK derivative.
+- **Access mechanics:** Publicly reachable on figshare without authentication.
+- **Access status:** **SOURCE_AMBIGUOUS** — public reachability does not make the governing license unambiguous.
+- **Required manual authorization:** Obtain written clarification from the derivative publisher or repository (figshare / SIMEXP / P. Bellec) on the relationship between the figshare CC BY 4.0 metadata and the upstream COBRE Attribution-NonCommercial terms. Until then, treat the release as non-commercial and non-redistributable.
 - **Planned acquisition subset:** The full lightweight derivative (preprocessed resting-state fMRI in MNI space, per-subject confound/time-series tables, and the accompanying phenotype table). Local usable counts are determined at analysis time, not here.
 - **Expected size:** 657,308,547 bytes across 297 files (figshare API article 4197885).
 - **External target root:** `$HOME/neuromultiverse-data/cobre_niak`
 - **Hash algorithm:** SHA-256
 - **External hash-manifest location:** `$HOME/neuromultiverse-data/cobre_niak/checksums.sha256` (created at acquisition, never committed)
-- **Re-verification command:** `curl -s https://api.figshare.com/v2/articles/4197885` (metadata only: license, version, per-file sizes and md5)
-- **Redistribution policy:** Not redistributed by this project; CC BY 4.0 attribution applies if it ever were.
-- **Re-identification prohibition:** No re-identification attempt permitted.
-- **Approval status:** Pending independent approval of this governance record.
+- **Re-verification command:** `curl -s https://api.figshare.com/v2/articles/4197885` (metadata only: license, version, description, per-file sizes and md5)
+- **Redistribution policy:** Not redistributed by this project; conservatively treated as non-redistributable while the license conflict is unresolved.
+- **Commercial use:** Not permitted under the conservative effective restriction.
+- **Re-identification prohibition (project):** The NeuroMultiverse project prohibits any re-identification attempt, independent of provider terms.
+- **Approval status:** Pending independent approval, and blocked by the unresolved license conflict.
 - **Approval date:** Not approved.
 - **Acquisition permitted:** No.
-- **Reason:** Access is READY, but the governance gate is not yet independently approved.
+- **Reason:** The layered-license conflict is unresolved (SOURCE_AMBIGUOUS); acquisition cannot proceed until authoritative clarification is obtained.
 
 ---
 
@@ -98,4 +104,4 @@ Neither optional dataset is permitted for acquisition, and neither appears as a 
 
 ## Acquisition gate
 
-No dataset is permitted for acquisition. The three required datasets have verified governance; ABIDE-I PCP additionally requires manual NITRC + INDI authorization before it could proceed. Pilot acquisition is a separate implementation unit that runs only after this record is independently approved.
+No dataset is permitted for acquisition. ds000030 has fully verified governance (CC0, READY) but is still gated on approval. ABIDE-I PCP additionally requires manual NITRC + INDI authorization. COBRE NIAK carries an unresolved layered-license conflict (figshare CC BY 4.0 vs upstream CC BY-NC) and is SOURCE_AMBIGUOUS: it cannot be acquired until the publisher clarifies the terms. Pilot acquisition is a separate implementation unit that runs only after this record is independently approved and every blocking condition is cleared.

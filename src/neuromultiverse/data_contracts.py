@@ -36,13 +36,16 @@ from pydantic import (
 
 __all__ = [
     "SUBJECT_MANIFEST_COLUMNS",
+    "USE_RESTRICTIONS",
     "AccessStatus",
     "AcquisitionEvent",
     "DatasetAccessRecord",
     "DatasetRole",
     "HashAlgorithm",
+    "LicenseStatus",
     "SubjectManifest",
     "SubjectManifestRecord",
+    "openneuro_doi_is_valid",
 ]
 
 # A conservative strict base: every model rejects unknown fields and validates
@@ -86,6 +89,49 @@ class DatasetRole(StrEnum):
     OPTIONAL_SENSITIVITY = "optional_sensitivity"
 
 
+class LicenseStatus(StrEnum):
+    """Whether a dataset's governing license is conclusively established.
+
+    A derivative can carry a repository-displayed license that conflicts with
+    the license of the upstream data it was built from. That layering is a
+    ``CONFLICT`` until an authoritative source reconciles it, and a conflicted
+    or unverified license can never authorize acquisition.
+    """
+
+    VERIFIED = "VERIFIED"
+    UNVERIFIED = "UNVERIFIED"
+    CONFLICT = "CONFLICT"
+
+
+#: Controlled short values for conservative effective use restrictions.
+USE_RESTRICTIONS: frozenset[str] = frozenset(
+    {
+        "no_commercial_use",
+        "no_redistribution",
+        "attribution_required",
+        "share_alike",
+        "registration_required",
+    }
+)
+
+
+_OPENNEURO_DOI_RE = re.compile(r"^10\.18112/openneuro\.(ds\d{6})\.v(\d+\.\d+\.\d+)$")
+
+
+def openneuro_doi_is_valid(doi: str, accession: str, version: str) -> bool:
+    """Return whether ``doi`` is a well-formed OpenNeuro snapshot DOI.
+
+    The DOI must encode both the accession and the pinned snapshot version, e.g.
+    ``10.18112/openneuro.ds000030.v1.0.0``. An unversioned DOI, a version
+    mismatch, or an accession mismatch all return False, so a pinned snapshot can
+    never be recorded against a DOI that names a different thing.
+    """
+    match = _OPENNEURO_DOI_RE.match(doi.strip())
+    if match is None:
+        return False
+    return match.group(1) == accession and match.group(2) == version
+
+
 def _reject_home_paths(value: str, field: str) -> str:
     for pattern in _ABSOLUTE_HOME_PATTERNS:
         if pattern.search(value):
@@ -107,13 +153,23 @@ class DatasetAccessRecord(BaseModel):
     provider: str = Field(min_length=1)
     authoritative_sources: Annotated[list[str], Field(min_length=1)]
     version: str = Field(min_length=1)
+    # ``license_id`` is the single effective/governing identifier for display and
+    # cross-checks. The layered fields below carry the full picture when a
+    # derivative's repository license differs from its upstream data license.
     license_id: str = Field(min_length=1)
+    license_status: LicenseStatus
+    repository_license_id: str | None = None
+    upstream_license_ids: list[str] = Field(default_factory=list)
+    effective_use_restrictions: list[str] = Field(default_factory=list)
     access_status: AccessStatus
     registration_required: bool
     approval_required: bool
     redistribution_allowed: bool
     commercial_use_allowed: bool
-    reidentification_prohibited: bool
+    # Whether the *provider or repository* license/terms explicitly restrict
+    # re-identification. This is a fact about the source, not the project's own
+    # standing prohibition, which is unconditional and lives in the protocol.
+    provider_reidentification_restricted: bool
     # ``None`` means the size is not yet verified. A READY, acquisition-permitted
     # dataset must supply it; a gated dataset may legitimately leave it open.
     expected_size_bytes: NonNegativeInt | None = None
@@ -130,13 +186,40 @@ class DatasetAccessRecord(BaseModel):
         for src in self.authoritative_sources:
             if not src.strip():
                 raise ValueError("authoritative_sources must not contain blank entries")
-        if self.acquisition_permitted and self.access_status is not AccessStatus.READY:
+
+        unknown = set(self.effective_use_restrictions) - USE_RESTRICTIONS
+        if unknown:
+            raise ValueError(f"unknown effective_use_restrictions: {sorted(unknown)}")
+
+        # Conservative effective restrictions must bind the boolean flags.
+        if "no_commercial_use" in self.effective_use_restrictions and self.commercial_use_allowed:
+            raise ValueError("no_commercial_use restriction conflicts with commercial_use_allowed")
+        if "no_redistribution" in self.effective_use_restrictions and self.redistribution_allowed:
+            raise ValueError("no_redistribution restriction conflicts with redistribution_allowed")
+
+        # A conflicted license cannot present as READY: reachable but ambiguous.
+        if (
+            self.license_status is LicenseStatus.CONFLICT
+            and self.access_status is AccessStatus.READY
+        ):
             raise ValueError(
-                "acquisition_permitted cannot be true unless access_status is READY "
-                f"(got {self.access_status.value})"
+                "a CONFLICT license cannot be READY; use SOURCE_AMBIGUOUS until reconciled"
             )
-        if self.acquisition_permitted and self.expected_size_bytes is None:
-            raise ValueError("acquisition_permitted requires a verified expected_size_bytes")
+
+        # Acquisition is gated on every prerequisite being verified at once.
+        if self.acquisition_permitted:
+            if self.access_status is not AccessStatus.READY:
+                raise ValueError(
+                    "acquisition_permitted cannot be true unless access_status is READY "
+                    f"(got {self.access_status.value})"
+                )
+            if self.license_status is not LicenseStatus.VERIFIED:
+                raise ValueError(
+                    "acquisition_permitted requires license_status VERIFIED "
+                    f"(got {self.license_status.value})"
+                )
+            if self.expected_size_bytes is None:
+                raise ValueError("acquisition_permitted requires a verified expected_size_bytes")
         return self
 
 
