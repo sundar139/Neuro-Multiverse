@@ -30,6 +30,7 @@ EXPECTED_RECEIPT = (
     "ds000030-pilot-acquisition-sha256:"
     "e2b194394687738f62b199539cdc7acca6627b40fcd6a4fbb45143891b7410ea"
 )
+AUDITED_MANIFEST_SHA256 = "32772c890a8aacbf23b8464cca9b458cb65d2e5a5d68570320ca5e62102de2b2"
 TR_TOLERANCE = 1e-4
 MAX_JSON_BYTES = 1_000_000
 MAX_JSON_DEPTH = 20
@@ -42,6 +43,30 @@ VALIDATOR_VERSION = "3.0.0"
 VALIDATOR_SCHEMA = "1.2.4"
 VALIDATOR_ARCHITECTURE = "amd64"
 DOCKER_COMMAND_POLICY_VERSION = "1"
+ERROR_CATEGORIES = frozenset(
+    {
+        "runtime_unsupported",
+        "evidence_permission_invalid",
+        "receipt_invalid",
+        "manifest_binding_invalid",
+        "manifest_invalid",
+        "raw_permission_invalid",
+        "raw_integrity_invalid",
+        "structure_invalid",
+        "metadata_invalid",
+        "header_invalid",
+        "docker_untrusted",
+        "docker_unavailable",
+        "image_missing",
+        "image_digest_mismatch",
+        "validator_version_mismatch",
+        "validator_output_invalid",
+        "validator_errors",
+        "validator_warning_unclassified",
+        "raw_changed",
+        "output_write_failed",
+    }
+)
 WARNING_CLASSIFICATIONS = {
     "JSON_KEY_RECOMMENDED": "nonblocking recommendation",
     "SIDECAR_KEY_RECOMMENDED": "nonblocking recommendation",
@@ -459,12 +484,13 @@ def _stats(values: list[int] | list[float]) -> dict[str, float]:
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
-def _docker_policy_args(raw_root: Path) -> list[str]:
+def _docker_base_policy_args() -> list[str]:
     uid = getattr(os, "geteuid", lambda: 0)()
     gid = getattr(os, "getegid", lambda: 0)()
     return [
         "run",
         "--rm",
+        "--pull=never",
         "--network=none",
         "--read-only",
         "--cap-drop=ALL",
@@ -473,9 +499,37 @@ def _docker_policy_args(raw_root: Path) -> list[str]:
         f"{uid}:{gid}",
         "--tmpfs",
         "/tmp:rw,noexec,nosuid,size=64m",  # noqa: S108 - container-only tmpfs
+    ]
+
+
+def _docker_dataset_policy_args(raw_root: Path) -> list[str]:
+    return [
+        *_docker_base_policy_args(),
         "--mount",
         f"type=bind,src={raw_root},dst=/data,readonly",
     ]
+
+
+def _trusted_docker(asserted: Path | None = None) -> Path:
+    resolved_name = shutil.which("docker")
+    if not resolved_name:
+        raise ValidationError("trusted Docker CLI is unavailable")
+    docker = Path(resolved_name).resolve(strict=True)
+    repository = Path(__file__).resolve().parents[1]
+    home = Path.home().resolve()
+    if not docker.is_file() or repository in docker.parents or home in docker.parents:
+        raise ValidationError("Docker CLI is not a trusted system executable")
+    info = docker.stat()
+    if os.name != "nt" and (info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022):
+        raise ValidationError("Docker CLI ownership or mode is unsafe")
+    if asserted is not None:
+        try:
+            asserted_docker = asserted.resolve(strict=True)
+        except OSError as exc:
+            raise ValidationError("supplied Docker path is unavailable") from exc
+        if asserted_docker != docker:
+            raise ValidationError("supplied Docker path differs from the trusted CLI")
+    return docker
 
 
 def _run_captured(
@@ -487,8 +541,14 @@ def _run_captured(
 def _inspect_validator_image(docker: Path, image: str, runner: CommandRunner) -> dict[str, Any]:
     if image != VALIDATOR_IMAGE or "@sha256:" not in image or image.endswith(":latest"):
         raise ValidationError("validator image is not the exact pinned digest")
-    _run_captured(runner, [str(docker), "info"], check=True)
-    result = _run_captured(runner, [str(docker), "image", "inspect", image], check=True)
+    try:
+        _run_captured(runner, [str(docker), "info"], check=True)
+    except subprocess.SubprocessError as exc:
+        raise ValidationError("Docker daemon is unavailable") from exc
+    try:
+        result = _run_captured(runner, [str(docker), "image", "inspect", image], check=True)
+    except subprocess.SubprocessError as exc:
+        raise ValidationError("validator image is missing") from exc
     try:
         inspected = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
@@ -501,6 +561,8 @@ def _inspect_validator_image(docker: Path, image: str, runner: CommandRunner) ->
         raise ValidationError("local validator image digest does not match")
     if details.get("Architecture") != VALIDATOR_ARCHITECTURE:
         raise ValidationError("validator image architecture is unsupported")
+    if details.get("Os") != "linux":
+        raise ValidationError("validator image operating system is unsupported")
     return details
 
 
@@ -582,13 +644,16 @@ def _run_validator(
     runner: CommandRunner = subprocess.run,
 ) -> dict[str, Any]:
     _inspect_validator_image(docker, image, runner)
-    policy = _docker_policy_args(raw_root)
-    version_result = _run_captured(runner, [str(docker), *policy, image, "--version"])
+    base_policy = _docker_base_policy_args()
+    version_result = _run_captured(runner, [str(docker), *base_policy, image, "--version"])
     version = version_result.stdout.strip()
     if version_result.returncode != 0 or version != VALIDATOR_VERSION:
         raise ValidationError("BIDS Validator version differs from the pinned version")
     started = _utc_now()
-    result = _run_captured(runner, [str(docker), *policy, image, "/data", "--format", "json"])
+    dataset_policy = _docker_dataset_policy_args(raw_root)
+    result = _run_captured(
+        runner, [str(docker), *dataset_policy, image, "/data", "--format", "json"]
+    )
     completed = _utc_now()
     fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
@@ -617,6 +682,32 @@ def _require_runtime() -> None:
         raise ValidationError("validation requires Ubuntu 24.04")
 
 
+def _validate_receipt_manifest_binding(receipt: dict[str, Any], manifest_path: Path) -> str:
+    required = {
+        "schema_version",
+        "scope",
+        "actual_final_file_count",
+        "actual_total_bytes",
+        "manifest_sha256",
+    }
+    if not required.issubset(receipt):
+        raise ValidationError("acquisition receipt lacks required fields")
+    if (
+        receipt["scope"] != "ds000030_pilot_5_subjects"
+        or receipt["actual_final_file_count"] != EXPECTED_FILES
+        or receipt["actual_total_bytes"] != EXPECTED_BYTES
+        or f"ds000030-pilot-acquisition-sha256:{_canonical_digest(receipt)}" != EXPECTED_RECEIPT
+    ):
+        raise ValidationError("acquisition receipt does not match approved evidence")
+    recorded = receipt["manifest_sha256"]
+    if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]{64}", recorded):
+        raise ValidationError("receipt manifest digest is malformed")
+    actual = _sha256(manifest_path)
+    if recorded != AUDITED_MANIFEST_SHA256 or actual != recorded:
+        raise ValidationError("manifest digest does not match acquisition evidence")
+    return actual
+
+
 def validate(args: argparse.Namespace, runner: CommandRunner = subprocess.run) -> dict[str, Any]:
     _require_runtime()
     if args.raw_root.is_symlink():
@@ -630,18 +721,12 @@ def validate(args: argparse.Namespace, runner: CommandRunner = subprocess.run) -
     _require_private_directory(args.output.parent)
     _require_private_evidence_file(args.manifest)
     _require_private_evidence_file(args.acquisition_receipt)
-    _validate_private_tree(raw_root)
     receipt = _strict_json(args.acquisition_receipt)
-    if (
-        receipt.get("scope") != "ds000030_pilot_5_subjects"
-        or receipt.get("actual_final_file_count") != EXPECTED_FILES
-        or receipt.get("actual_total_bytes") != EXPECTED_BYTES
-        or f"ds000030-pilot-acquisition-sha256:{_canonical_digest(receipt)}" != EXPECTED_RECEIPT
-    ):
-        raise ValidationError("acquisition receipt does not match approved evidence")
+    actual_manifest_digest = _validate_receipt_manifest_binding(receipt, args.manifest)
     manifest = _read_manifest(args.manifest)
     if len(manifest) != EXPECTED_FILES:
         raise ValidationError("manifest entry count is not 22")
+    _validate_private_tree(raw_root)
     pre = _snapshot(raw_root, manifest)
     if sum(item["size"] for item in pre.values()) != EXPECTED_BYTES:
         raise ValidationError("raw byte total differs from acquisition evidence")
@@ -650,7 +735,7 @@ def validate(args: argparse.Namespace, runner: CommandRunner = subprocess.run) -
     metadata = _validate_metadata(raw_root, structure)
     validator_output = args.output.with_suffix(".validator.json")
     validator = _run_validator(
-        args.docker_executable.resolve(strict=True),
+        _trusted_docker(args.docker_executable),
         args.validator_image,
         raw_root,
         validator_output,
@@ -678,7 +763,8 @@ def validate(args: argparse.Namespace, runner: CommandRunner = subprocess.run) -
         "validator": validator,
         "validated_final_file_count": len(post),
         "validated_total_bytes": sum(value["size"] for value in post.values()),
-        "manifest_sha256": _sha256(args.manifest),
+        "manifest_sha256": actual_manifest_digest,
+        "acquisition_manifest_binding_verified": True,
         "pre_validation_manifest_matches": True,
         "post_validation_manifest_matches": True,
         "json_files_parsed": metadata["json_files_parsed"],
@@ -722,6 +808,7 @@ def validate(args: argparse.Namespace, runner: CommandRunner = subprocess.run) -
         "nifti_headers_parsed": headers["nifti_headers_parsed"],
         "voxel_arrays_loaded": 0,
         "changed_files": changed,
+        "acquisition_manifest_binding_verified": True,
         "validation_report_sha256": digest,
     }
 
@@ -737,16 +824,50 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+def _error_category(exc: BaseException) -> str:
+    if isinstance(exc, subprocess.SubprocessError):
+        return "docker_unavailable"
+    message = str(exc).casefold()
+    rules = (
+        (("wsl2", "ubuntu 24.04"), "runtime_unsupported"),
+        (("trusted docker", "docker cli", "supplied docker"), "docker_untrusted"),
+        (("docker daemon",), "docker_unavailable"),
+        (("evidence mode", "evidence is missing", "owner"), "evidence_permission_invalid"),
+        (("receipt manifest", "manifest digest"), "manifest_binding_invalid"),
+        (("acquisition receipt", "required fields"), "receipt_invalid"),
+        (("manifest",), "manifest_invalid"),
+        (("raw file mode", "private directory", "raw root"), "raw_permission_invalid"),
+        (("hash or size", "byte total"), "raw_integrity_invalid"),
+        (("structure", "directory count", "file count", "pairing"), "structure_invalid"),
+        (("metadata", "repetition time", "slice timing"), "metadata_invalid"),
+        (("nifti", "header", "affine", "voxel spacing", "orientation"), "header_invalid"),
+        (("image digest",), "image_digest_mismatch"),
+        (("image",), "image_missing"),
+        (("validator version",), "validator_version_mismatch"),
+        (("unclassified warning",), "validator_warning_unclassified"),
+        (("reported errors",), "validator_errors"),
+        (("validator",), "validator_output_invalid"),
+        (("changed during validation",), "raw_changed"),
+    )
+    for needles, category in rules:
+        if any(needle in message for needle in needles):
+            return category
+    return "output_write_failed" if isinstance(exc, OSError) else "validator_output_invalid"
+
+
 def main() -> int:
     args = parser().parse_args()
     try:
         summary = validate(args)
     except (OSError, subprocess.SubprocessError, ValidationError) as exc:
+        category = _error_category(exc)
+        if category not in ERROR_CATEGORIES:
+            category = "validator_output_invalid"
         failure = {
             "schema_version": "1",
             "validation_completed_at_utc": _utc_now(),
             "validation_decision": "blocked",
-            "blocking_issues": [str(exc)],
+            "blocking_issues": [category],
             "voxel_arrays_loaded": 0,
             "raw_files_modified": 0,
         }
@@ -756,16 +877,20 @@ def main() -> int:
         except ValidationError:
             output_parent_private = False
         if output_parent_private and not args.output.exists():
-            fd = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                stream.write(json.dumps(failure, indent=2, sort_keys=True) + "\n")
-                stream.flush()
-                os.fsync(stream.fileno())
+            try:
+                fd = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    stream.write(json.dumps(failure, indent=2, sort_keys=True) + "\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except OSError:
+                category = "output_write_failed"
+                failure["blocking_issues"] = [category]
         print(
             json.dumps(
                 {
                     "validation_passed": False,
-                    "problem": str(exc),
+                    "error_category": category,
                     "validation_report_sha256": _canonical_digest(failure),
                 }
             )

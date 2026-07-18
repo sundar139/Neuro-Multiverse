@@ -540,12 +540,41 @@ def add_manifest_entry(
 
 
 def completion_status(
-    target: Path, expected_size: int, manifest: dict[str, str], relative: str
+    raw_root: Path,
+    target: Path,
+    expected_size: int,
+    manifest: dict[str, str],
+    relative: str,
 ) -> str:
-    """Integrity-aware completion. Size alone is never 'complete'."""
+    """Integrity- and privacy-aware completion. Unsafe files are never complete."""
+    if target.is_symlink():
+        return "unsafe_file_type"
     if not target.exists():
         return "absent"
-    if target.stat().st_size != expected_size:
+    try:
+        info = target.stat()
+        resolved_root = raw_root.resolve(strict=True)
+        resolved_target = target.resolve(strict=True)
+    except OSError:
+        return "unsafe_file_type"
+    if not target.is_file() or resolved_root not in resolved_target.parents:
+        return "unsafe_file_type"
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        return "unsafe_owner"
+    if hasattr(os, "getuid") and stat.S_IMODE(info.st_mode) != 0o600:
+        return "unsafe_permissions"
+    current = target.parent
+    while True:
+        try:
+            _require_private_directory(current)
+        except PermissionError:
+            return "unsafe_parent_directory"
+        if current.resolve() == resolved_root:
+            break
+        if resolved_root not in current.resolve().parents:
+            return "unsafe_parent_directory"
+        current = current.parent
+    if info.st_size != expected_size:
         return "size_mismatch"
     recorded = manifest.get(relative)
     if recorded is None:
@@ -943,10 +972,14 @@ def validate_execution_preconditions(
                 problems.append("an execution-critical directory lacks mode 700")
 
     allowed = frozenset(entry.local_relative_target for entry in plan_model.files)
+    manifest: dict[str, str] = {}
     try:
-        read_manifest(manifest_path, allowed)
+        manifest = read_manifest(manifest_path, allowed)
     except (OSError, UnicodeError, ManifestError):
         problems.append("existing checksum manifest is invalid")
+    problems.extend(
+        _existing_artifact_problems(plan_model, target_root, manifest, manifest_path, log_dir)
+    )
     if lock_path.exists():
         problems.append("execution lock is not available")
 
@@ -1086,6 +1119,61 @@ def _require_private_file(path: Path) -> None:
         raise PermissionError("private file mode is not 600")
 
 
+def _existing_artifact_problems(
+    plan: PilotAcquisitionPlan,
+    raw_root: Path,
+    manifest: dict[str, str],
+    manifest_path: Path,
+    log_dir: Path,
+) -> list[str]:
+    """Validate every existing final, partial, quarantine, and private parent."""
+    problems: list[str] = []
+    for directory in (raw_root, manifest_path.parent, log_dir):
+        if directory.exists():
+            try:
+                _require_private_directory(directory)
+            except PermissionError:
+                problems.append("unsafe existing directory")
+    for entry in plan.files:
+        target = raw_root / entry.local_relative_target
+        for parent in (target.parent, target.parent.parent):
+            if parent.exists():
+                try:
+                    _require_private_directory(parent)
+                except PermissionError:
+                    problems.append("unsafe planned parent directory")
+        status = completion_status(
+            raw_root,
+            target,
+            entry.provider_size_bytes,
+            manifest,
+            entry.local_relative_target,
+        )
+        if status not in {"absent", "complete"}:
+            problems.append(f"existing final is {status}")
+        partial = target.with_suffix(target.suffix + ".partial")
+        if partial.exists() or partial.is_symlink():
+            try:
+                _require_private_file(partial)
+            except PermissionError:
+                problems.append("unsafe existing partial")
+            problems.append("existing partial requires operator review")
+        if any(target.parent.glob(target.name + ".unrecorded.*")):
+            problems.append("existing quarantine requires operator review")
+    return problems
+
+
+def _prepare_execution_directories(
+    plan: PilotAcquisitionPlan, raw_root: Path, manifest_path: Path, log_dir: Path
+) -> None:
+    """Create all required private directories before any body request or event."""
+    _ensure_private_directory(manifest_path.parent)
+    _ensure_private_directory(raw_root)
+    _ensure_private_directory(log_dir)
+    for entry in plan.files:
+        _ensure_private_target_parents(raw_root, (raw_root / entry.local_relative_target).parent)
+
+
 def _stream_download(url: str, partial: Path, expected_size: int, entry: PilotFileEntry) -> str:
     """Stream to ``partial``, hash (local + provider), verify size, fsync.
 
@@ -1195,7 +1283,10 @@ def _run_execution(
     manifest_path: Path,
     lock_path: Path,
 ) -> int:
-    _ensure_private_directory(target_root)
+    try:
+        _prepare_execution_directories(plan_model, target_root, manifest_path, log_dir)
+    except PermissionError:
+        return 1
     resolved_root = target_root.resolve()
     allowed = frozenset(f.local_relative_target for f in plan_model.files)
     context = _event_context(plan_model, approval)
@@ -1218,12 +1309,19 @@ def _run_execution(
     try:
         current_entry: PilotFileEntry | None = None
         manifest = read_manifest(manifest_path, allowed)  # validate whole manifest first
+        existing_problems = _existing_artifact_problems(
+            plan_model, resolved_root, manifest, manifest_path, log_dir
+        )
+        if existing_problems:
+            raise RuntimeError("existing acquisition artifact is unsafe")
         append_event(log_dir, {**context, "event": "run_started"})
         for entry in plan_model.files:
             current_entry = entry
             rel = entry.local_relative_target
             target = (resolved_root / rel).resolve()
-            status = completion_status(target, entry.provider_size_bytes, manifest, rel)
+            status = completion_status(
+                resolved_root, target, entry.provider_size_bytes, manifest, rel
+            )
             if status == "complete":
                 append_event(
                     log_dir,

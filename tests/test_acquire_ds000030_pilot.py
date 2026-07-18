@@ -17,6 +17,7 @@ import os
 import stat
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -963,6 +964,66 @@ def test_valid_execution_preflight_resolves_all_objects(
     assert summary["preconditions_ok"] is True
 
 
+def test_execution_preflight_is_nonmutating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args, fetcher = _execution_preflight_fixture(tmp_path, monkeypatch)
+    target = Path(args[args.index("--target-root") + 1])
+    assert not any(path.is_dir() for path in target.iterdir())
+    assert tool.main(args, fetcher=fetcher) == 0
+    assert not any(path.is_dir() for path in target.iterdir())
+
+
+@pytest.mark.parametrize("suffix", [".partial", ".unrecorded.synthetic"])
+def test_existing_partial_or_quarantine_blocks_preflight_before_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+) -> None:
+    args, _fetcher = _execution_preflight_fixture(tmp_path, monkeypatch)
+    target_root = Path(args[args.index("--target-root") + 1])
+    plan = _valid_plan_dict()
+    target = target_root / plan["files"][0]["local_relative_target"]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    artifact = target.with_suffix(target.suffix + suffix)
+    artifact.write_bytes(b"synthetic")
+    if os.name != "nt":
+        for directory in (target.parent.parent, target.parent):
+            directory.chmod(0o700)
+        artifact.chmod(0o600)
+    called = False
+
+    def forbidden(_oid: str, _path: str) -> list[dict[str, Any]]:
+        nonlocal called
+        called = True
+        return []
+
+    assert tool.main(args, fetcher=forbidden) == 1
+    assert artifact.exists() and not called
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode enforcement")
+def test_mode_644_existing_final_blocks_preflight_before_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args, _fetcher = _execution_preflight_fixture(tmp_path, monkeypatch)
+    target_root = Path(args[args.index("--target-root") + 1])
+    entry = _valid_plan_dict()["files"][0]
+    target = target_root / entry["local_relative_target"]
+    target.write_bytes(b"x" * entry["provider_size_bytes"])
+    target.chmod(0o644)
+    called = False
+
+    def forbidden(_oid: str, _path: str) -> list[dict[str, Any]]:
+        nonlocal called
+        called = True
+        return []
+
+    assert tool.main(args, fetcher=forbidden) == 1
+    assert target.exists() and stat.S_IMODE(target.stat().st_mode) == 0o644
+    assert not called
+
+
 def test_execution_preflight_missing_metadata_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1225,22 +1286,113 @@ def test_add_manifest_entry_refuses_conflicting_digest(tmp_path: Path) -> None:
 
 # --- Integrity primitives ---------------------------------------------------
 def test_same_size_without_checksum_is_not_complete(tmp_path: Path) -> None:
-    target = tmp_path / "a.bin"
+    root = tmp_path / "raw"
+    root.mkdir(mode=0o700)
+    target = root / "a.bin"
     target.write_bytes(b"1234")
-    assert tool.completion_status(target, 4, {}, "a.bin") == "size_only_unverified"
+    if os.name != "nt":
+        target.chmod(0o600)
+    assert tool.completion_status(root, target, 4, {}, "a.bin") == "size_only_unverified"
 
 
 def test_matching_checksum_is_complete(tmp_path: Path) -> None:
-    target = tmp_path / "a.bin"
+    root = tmp_path / "raw"
+    root.mkdir(mode=0o700)
+    target = root / "a.bin"
     target.write_bytes(b"1234")
+    if os.name != "nt":
+        target.chmod(0o600)
     manifest = {"a.bin": hashlib.sha256(b"1234").hexdigest()}
-    assert tool.completion_status(target, 4, manifest, "a.bin") == "complete"
+    assert tool.completion_status(root, target, 4, manifest, "a.bin") == "complete"
 
 
 def test_mismatching_checksum_rejected(tmp_path: Path) -> None:
-    target = tmp_path / "a.bin"
+    root = tmp_path / "raw"
+    root.mkdir(mode=0o700)
+    target = root / "a.bin"
     target.write_bytes(b"1234")
-    assert tool.completion_status(target, 4, {"a.bin": "0" * 64}, "a.bin") == "checksum_mismatch"
+    if os.name != "nt":
+        target.chmod(0o600)
+    assert (
+        tool.completion_status(root, target, 4, {"a.bin": "0" * 64}, "a.bin") == "checksum_mismatch"
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode enforcement")
+def test_matching_mode_644_file_is_unsafe(tmp_path: Path) -> None:
+    root = tmp_path / "raw"
+    root.mkdir(mode=0o700)
+    target = root / "a.bin"
+    target.write_bytes(b"1234")
+    target.chmod(0o644)
+    manifest = {"a.bin": hashlib.sha256(b"1234").hexdigest()}
+    assert tool.completion_status(root, target, 4, manifest, "a.bin") == "unsafe_permissions"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+def test_matching_symlink_is_unsafe(tmp_path: Path) -> None:
+    root = tmp_path / "raw"
+    root.mkdir(mode=0o700)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"1234")
+    outside.chmod(0o600)
+    target = root / "a.bin"
+    target.symlink_to(outside)
+    manifest = {"a.bin": hashlib.sha256(b"1234").hexdigest()}
+    assert tool.completion_status(root, target, 4, manifest, "a.bin") == "unsafe_file_type"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode enforcement")
+def test_file_outside_raw_root_is_unsafe(tmp_path: Path) -> None:
+    root = tmp_path / "raw"
+    root.mkdir(mode=0o700)
+    target = tmp_path / "outside.bin"
+    target.write_bytes(b"1234")
+    target.chmod(0o600)
+    manifest = {"a.bin": hashlib.sha256(b"1234").hexdigest()}
+    assert tool.completion_status(root, target, 4, manifest, "a.bin") == "unsafe_file_type"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode enforcement")
+def test_matching_file_under_mode_755_parent_is_unsafe(tmp_path: Path) -> None:
+    root = tmp_path / "raw"
+    root.mkdir(mode=0o700)
+    parent = root / "sub-synthetic"
+    parent.mkdir(mode=0o755)
+    target = parent / "a.bin"
+    target.write_bytes(b"1234")
+    target.chmod(0o600)
+    manifest = {"sub-synthetic/a.bin": hashlib.sha256(b"1234").hexdigest()}
+    assert (
+        tool.completion_status(root, target, 4, manifest, "sub-synthetic/a.bin")
+        == "unsafe_parent_directory"
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership enforcement")
+def test_matching_wrong_owner_file_is_unsafe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "raw"
+    root.mkdir(mode=0o700)
+    target = root / "a.bin"
+    target.write_bytes(b"1234")
+    target.chmod(0o600)
+    real_stat = tool.Path.stat
+
+    def wrong_owner(path: Path, *args: Any, **kwargs: Any) -> Any:
+        result = real_stat(path, *args, **kwargs)
+        if path == target:
+            return SimpleNamespace(
+                st_uid=getattr(os, "getuid", lambda: 0)() + 1,
+                st_mode=result.st_mode,
+                st_size=result.st_size,
+            )
+        return result
+
+    monkeypatch.setattr(tool.Path, "stat", wrong_owner)
+    manifest = {"a.bin": hashlib.sha256(b"1234").hexdigest()}
+    assert tool.completion_status(root, target, 4, manifest, "a.bin") == "unsafe_owner"
 
 
 # --- Streamed download / promotion (injected stream) ------------------------
@@ -1600,6 +1752,7 @@ def test_synthetic_execution_promotes_and_records(
         assert (root / f.local_relative_target).stat().st_size == f.provider_size_bytes
         if os.name != "nt":
             assert stat.S_IMODE((root / f.local_relative_target).stat().st_mode) == 0o600
+            assert stat.S_IMODE((root / f.local_relative_target).parent.stat().st_mode) == 0o700
     events = (tmp_path / "acquisition-log" / "acquisition-events.jsonl").read_text(encoding="utf-8")
     assert "run_completed" in events
 

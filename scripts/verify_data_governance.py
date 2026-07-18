@@ -91,7 +91,7 @@ DS000030_ACQUISITION_REFERENCE = (
 DS000030_ACQUISITION_COMPLETED_AT = "2026-07-18T07:34:41.416478Z"
 HARDENED_EXECUTOR_FILE_SHA256 = {
     "scripts/acquire_ds000030_pilot.py": (
-        "8f6145ce6a7b658320f784c6148d3c74cdb32dbed7312e8fa7635590a73f2d24"
+        "2cfd77aa546617aa4ddebbe41a71700e8f26848c06b4d048bea65eb1d95f0b96"
     ),
     "src/neuromultiverse/ds000030_pilot.py": (
         "159f1c4251c5eb81ed6be5a915485e19983977e4447834e006fa8f84ccb58d74"
@@ -550,6 +550,14 @@ def _check_raw_validation_tool() -> list[str]:
         "_validate_private_tree",
         "raw file mode is not 600",
         "private directory mode is not 700",
+        "32772c890a8aacbf23b8464cca9b458cb65d2e5a5d68570320ca5e62102de2b2",
+        "actual != recorded",
+        "_trusted_docker",
+        '"--pull=never"',
+        "_docker_base_policy_args",
+        "_docker_dataset_policy_args",
+        'details.get("Os") != "linux"',
+        "ERROR_CATEGORIES",
     )
     for marker in required_markers:
         if marker not in source:
@@ -557,6 +565,10 @@ def _check_raw_validation_tool() -> list[str]:
     for forbidden_mode in ("--repair", "--fix", "--normalize"):
         if forbidden_mode in source:
             problems.append(f"raw validation tool exposes forbidden mode {forbidden_mode}")
+    if ".chmod(" in source or "os.chmod(" in source:
+        problems.append("raw validation tool contains a forbidden chmod path")
+    if '"blocking_issues": [str(exc)]' in source or '"problem": str(exc)' in source:
+        problems.append("raw validation tool exposes raw exception text")
     if any(path.name == ".bidsignore" for path in REPO_ROOT.rglob(".bidsignore")):
         problems.append("repository contains a forbidden .bidsignore")
     executor = EXECUTOR.read_text(encoding="utf-8")
@@ -566,6 +578,12 @@ def _check_raw_validation_tool() -> list[str]:
         "0o600",
         "_ensure_private_target_parents",
         "private directory mode is not 700",
+        "unsafe_permissions",
+        "unsafe_parent_directory",
+        "_existing_artifact_problems",
+        "existing partial requires operator review",
+        "existing quarantine requires operator review",
+        "_prepare_execution_directories",
     ):
         if marker not in executor:
             problems.append(f"acquisition executor lacks secure raw creation marker: {marker}")
