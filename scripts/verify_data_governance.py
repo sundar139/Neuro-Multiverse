@@ -494,6 +494,33 @@ def _check_executor_hardening() -> list[str]:
     return problems
 
 
+def _check_raw_validation_tool() -> list[str]:
+    """Keep raw validation read-only and free of voxel-array access."""
+    problems: list[str] = []
+    path = REPO_ROOT / "scripts" / "validate_ds000030_pilot.py"
+    if not path.exists():
+        return ["raw validation tool is missing"]
+    source = path.read_text(encoding="utf-8")
+    for option in (
+        "--raw-root",
+        "--manifest",
+        "--acquisition-receipt",
+        "--output",
+        "--bids-validator",
+    ):
+        if option not in source:
+            problems.append(f"raw validation tool is missing {option}")
+    for forbidden in (".get_fdata(", ".get_data(", "np.asarray(image.dataobj)"):
+        if forbidden in source:
+            problems.append("raw validation tool contains voxel-array access")
+    for forbidden_mode in ("--repair", "--fix", "--normalize"):
+        if forbidden_mode in source:
+            problems.append(f"raw validation tool exposes forbidden mode {forbidden_mode}")
+    if any(path.name == ".bidsignore" for path in REPO_ROOT.rglob(".bidsignore")):
+        problems.append("repository contains a forbidden .bidsignore")
+    return problems
+
+
 def verified_citation_topics() -> set[str]:
     """Return the set of citation-inventory topics marked ``Verified``."""
     verified: set[str] = set()
@@ -668,6 +695,7 @@ def check(records: list[DatasetAccessRecord]) -> list[str]:
 
     problems.extend(_check_no_selected_identifiers())
     problems.extend(_check_executor_hardening())
+    problems.extend(_check_raw_validation_tool())
     problems.extend(_check_citation_dois())
     problems.extend(_check_false_attribution())
     problems.extend(_check_manual_actions(records))

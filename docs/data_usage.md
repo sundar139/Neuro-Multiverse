@@ -73,6 +73,8 @@ Only the bounded ds000030 five-subject pilot has completed acquisition. The full
 
 The approval covered only this completed transfer. This evidence commit invalidates its exact-HEAD binding for future execution; any resume or additional acquisition requires a new approval. ABIDE, COBRE, and the approximately 20-subject expansion remain unauthorized.
 
+Raw structural validation is currently blocked: all 22 acquired files are mode 644, while the read-only validator requires private raw-file permissions. Hashes, sizes, and acquisition evidence still match. A preliminary pinned BIDS Validator 3.0.0 run (schema 1.2.4) reported zero errors and 139 recommendation-only warnings, but the project does not mark raw validation complete until the permission defect is resolved through an approved, auditable correction. No raw file was modified, no voxel array was loaded, and preprocessing has not begun.
+
 ## 4. Standing prohibitions
 
 - No raw imaging data, derivative imaging, model weight, feature cache, or restricted file may be committed to this repository.
