@@ -170,14 +170,32 @@ class DatasetAccessRecord(BaseModel):
     # re-identification. This is a fact about the source, not the project's own
     # standing prohibition, which is unconditional and lives in the protocol.
     provider_reidentification_restricted: bool
-    # ``None`` means the size is not yet verified. A READY, acquisition-permitted
-    # dataset must supply it; a gated dataset may legitimately leave it open.
+    # Identifies the exact file set the next acquisition event would retrieve.
+    # Size evidence is only valid for this same scope: a full-dataset total can
+    # never authorize a subset download.
+    acquisition_scope_id: str = Field(min_length=1)
+    # ``expected_size_bytes`` is the size of the set named by ``size_scope_id``;
+    # it is authorization evidence only when that scope equals the acquisition
+    # scope. A provider-wide total is informational, recorded in
+    # ``expected_size_source`` prose, never as verified subset evidence.
     expected_size_bytes: NonNegativeInt | None = None
+    size_scope_id: str | None = None
     expected_size_source: str = Field(min_length=1)
     verification_date: date
     citation_ids: Annotated[list[str], Field(min_length=1)]
     target_root: str = Field(min_length=1)
     hash_algorithm: HashAlgorithm = "sha256"
+    # Portable, outside-Git path to the checksum manifest for this dataset. The
+    # extension must match the hash algorithm. The file is not created here.
+    hash_manifest_location: str | None = None
+    # Numeric storage evidence. All present together (and satisfying the capacity
+    # inequality) exactly when storage_verified is true; all None otherwise.
+    storage_available_bytes: NonNegativeInt | None = None
+    storage_required_bytes: NonNegativeInt | None = None
+    storage_margin_bytes: NonNegativeInt | None = None
+    # Non-secret pointer to an external acquisition log / approval record. Never a
+    # user path, username, token, account email, or credential.
+    storage_evidence_reference: str | None = None
     # Explicit acquisition-checklist prerequisites, each machine-enforced. They
     # are separate booleans rather than one "verified" flag so that a single
     # unmet item cannot be papered over. ``storage_verified`` is only true after
@@ -218,9 +236,54 @@ class DatasetAccessRecord(BaseModel):
                 "a CONFLICT license cannot be READY; use SOURCE_AMBIGUOUS until reconciled"
             )
 
-        # size_verified is meaningless without an actual size.
-        if self.size_verified and self.expected_size_bytes is None:
-            raise ValueError("size_verified cannot be true while expected_size_bytes is None")
+        # Size evidence must belong to the acquisition scope, not a wider set.
+        if self.size_verified:
+            if self.expected_size_bytes is None:
+                raise ValueError("size_verified cannot be true while expected_size_bytes is None")
+            if not (self.size_scope_id and self.size_scope_id.strip()):
+                raise ValueError("size_verified requires a nonblank size_scope_id")
+            if self.size_scope_id != self.acquisition_scope_id:
+                raise ValueError(
+                    "size_verified evidence is for a different scope "
+                    f"({self.size_scope_id!r} != {self.acquisition_scope_id!r})"
+                )
+        elif self.size_scope_id is not None:
+            raise ValueError("size_scope_id must be None while size_verified is false")
+
+        # Hash strategy must point at a portable, algorithm-matched manifest.
+        if self.hash_strategy_verified:
+            location = self.hash_manifest_location
+            if not (location and location.strip()):
+                raise ValueError("hash_strategy_verified requires a hash_manifest_location")
+            _reject_home_paths(location, "hash_manifest_location")
+            expected_ext = f".{self.hash_algorithm}"
+            if not location.endswith(expected_ext):
+                raise ValueError(
+                    f"hash_manifest_location must end with {expected_ext} for {self.hash_algorithm}"
+                )
+
+        # Storage evidence is all-or-nothing and must satisfy the capacity margin.
+        available = self.storage_available_bytes
+        required = self.storage_required_bytes
+        margin = self.storage_margin_bytes
+        ref = self.storage_evidence_reference
+        storage_fields = (available, required, margin, ref)
+        if self.storage_verified:
+            if available is None or required is None or margin is None or ref is None:
+                raise ValueError("storage_verified requires all storage-evidence fields")
+            if not ref.strip():
+                raise ValueError("storage_verified requires a nonblank storage_evidence_reference")
+            _reject_home_paths(ref, "storage_evidence_reference")
+            if "@" in ref:
+                raise ValueError("storage_evidence_reference must not contain an email address")
+            if margin <= 0:
+                raise ValueError("storage_margin_bytes must be greater than zero")
+            if available < required + margin:
+                raise ValueError("storage_available_bytes must exceed required + margin")
+        elif any(f is not None for f in storage_fields):
+            raise ValueError(
+                "storage-evidence fields must all be None while storage_verified is false"
+            )
 
         # required_manual_action must track the access state, not float free of it.
         blocking = self.access_status is not AccessStatus.READY

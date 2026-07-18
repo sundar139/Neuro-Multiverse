@@ -52,15 +52,22 @@ def _access_kwargs(**overrides: Any) -> dict[str, Any]:
         "redistribution_allowed": True,
         "commercial_use_allowed": True,
         "provider_reidentification_restricted": False,
+        "acquisition_scope_id": "synthetic_scope",
         "expected_size_bytes": 1024,
+        "size_scope_id": "synthetic_scope",
         "expected_size_source": "provider metadata API",
         "verification_date": date(2026, 7, 17),
         "citation_ids": ["synthetic-cite"],
         "target_root": "$HOME/neuromultiverse-data/synthetic",
         "hash_algorithm": "sha256",
+        "hash_manifest_location": "$HOME/neuromultiverse-data/synthetic/checksums.sha256",
+        "storage_available_bytes": None,
+        "storage_required_bytes": None,
+        "storage_margin_bytes": None,
+        "storage_evidence_reference": None,
         "citation_verified": True,
         "size_verified": True,
-        "storage_verified": True,
+        "storage_verified": False,
         "hash_strategy_verified": True,
         "required_manual_action": None,
         "acquisition_permitted": False,
@@ -142,36 +149,165 @@ def test_permitted_requires_verified_size() -> None:
         DatasetAccessRecord(**_access_kwargs(acquisition_permitted=True, expected_size_bytes=None))
 
 
+_VALID_STORAGE = {
+    "storage_verified": True,
+    "storage_available_bytes": 2000,
+    "storage_required_bytes": 1000,
+    "storage_margin_bytes": 500,
+    "storage_evidence_reference": "acquisition-log-0001",
+}
+
+
+def _permittable_kwargs(**overrides: Any) -> dict[str, Any]:
+    """Fixture with every acquisition prerequisite satisfied (permittable)."""
+    base = _access_kwargs(**_VALID_STORAGE, acquisition_permitted=True)
+    base.update(overrides)
+    return base
+
+
 def test_permitted_ready_with_all_prerequisites_is_allowed() -> None:
-    record = DatasetAccessRecord(**_access_kwargs(acquisition_permitted=True))
+    record = DatasetAccessRecord(**_permittable_kwargs())
     assert record.acquisition_permitted is True
 
 
 def test_citation_verified_false_blocks_acquisition() -> None:
     with pytest.raises(ValidationError, match="prerequisites"):
-        DatasetAccessRecord(**_access_kwargs(acquisition_permitted=True, citation_verified=False))
+        DatasetAccessRecord(**_permittable_kwargs(citation_verified=False))
 
 
 def test_size_verified_false_blocks_acquisition() -> None:
     with pytest.raises(ValidationError, match="prerequisites"):
-        DatasetAccessRecord(**_access_kwargs(acquisition_permitted=True, size_verified=False))
+        DatasetAccessRecord(**_permittable_kwargs(size_verified=False, size_scope_id=None))
 
 
 def test_storage_verified_false_blocks_acquisition() -> None:
-    with pytest.raises(ValidationError, match="prerequisites"):
-        DatasetAccessRecord(**_access_kwargs(acquisition_permitted=True, storage_verified=False))
+    with pytest.raises(ValidationError):
+        DatasetAccessRecord(
+            **_permittable_kwargs(
+                storage_verified=False,
+                storage_available_bytes=None,
+                storage_required_bytes=None,
+                storage_margin_bytes=None,
+                storage_evidence_reference=None,
+            )
+        )
 
 
 def test_hash_strategy_verified_false_blocks_acquisition() -> None:
     with pytest.raises(ValidationError, match="prerequisites"):
-        DatasetAccessRecord(
-            **_access_kwargs(acquisition_permitted=True, hash_strategy_verified=False)
-        )
+        DatasetAccessRecord(**_permittable_kwargs(hash_strategy_verified=False))
 
 
 def test_size_verified_requires_expected_size() -> None:
     with pytest.raises(ValidationError, match="size_verified"):
         DatasetAccessRecord(**_access_kwargs(size_verified=True, expected_size_bytes=None))
+
+
+def test_size_scope_must_match_acquisition_scope() -> None:
+    with pytest.raises(ValidationError, match="different scope"):
+        DatasetAccessRecord(**_access_kwargs(size_scope_id="a_different_scope"))
+
+
+def test_size_verified_false_requires_none_size_scope() -> None:
+    with pytest.raises(ValidationError, match="size_scope_id must be None"):
+        DatasetAccessRecord(
+            **_access_kwargs(size_verified=False, expected_size_bytes=None, size_scope_id="scope")
+        )
+
+
+def test_full_snapshot_size_cannot_authorize_subset() -> None:
+    # A full-dataset total under a different scope must not be size evidence.
+    with pytest.raises(ValidationError, match="different scope"):
+        DatasetAccessRecord(
+            **_access_kwargs(
+                acquisition_scope_id="ds_pilot_5_subjects",
+                expected_size_bytes=85_000_000_000,
+                size_scope_id="ds_full_snapshot",
+            )
+        )
+
+
+def test_hash_verified_requires_manifest_location() -> None:
+    with pytest.raises(ValidationError, match="hash_manifest_location"):
+        DatasetAccessRecord(
+            **_access_kwargs(hash_strategy_verified=True, hash_manifest_location=None)
+        )
+
+
+def test_sha256_requires_sha256_manifest_extension() -> None:
+    with pytest.raises(ValidationError, match=r"\.sha256"):
+        DatasetAccessRecord(
+            **_access_kwargs(
+                hash_algorithm="sha256",
+                hash_manifest_location="$HOME/neuromultiverse-data/x/checksums.sha512",
+            )
+        )
+
+
+def test_sha512_requires_sha512_manifest_extension() -> None:
+    with pytest.raises(ValidationError, match=r"\.sha512"):
+        DatasetAccessRecord(
+            **_access_kwargs(
+                hash_algorithm="sha512",
+                hash_manifest_location="$HOME/neuromultiverse-data/x/checksums.sha256",
+            )
+        )
+
+
+def test_manifest_location_rejects_absolute_user_path() -> None:
+    with pytest.raises(ValidationError, match="portable"):
+        DatasetAccessRecord(
+            **_access_kwargs(hash_manifest_location="/home/someone/data/checksums.sha256")
+        )
+
+
+def test_storage_verified_requires_all_evidence() -> None:
+    with pytest.raises(ValidationError, match="all storage-evidence"):
+        DatasetAccessRecord(**_access_kwargs(storage_verified=True, storage_available_bytes=1000))
+
+
+def test_zero_storage_margin_rejected() -> None:
+    with pytest.raises(ValidationError, match="storage_margin_bytes"):
+        DatasetAccessRecord(
+            **_access_kwargs(
+                storage_verified=True,
+                storage_available_bytes=2000,
+                storage_required_bytes=1000,
+                storage_margin_bytes=0,
+                storage_evidence_reference="log-1",
+            )
+        )
+
+
+def test_insufficient_storage_capacity_rejected() -> None:
+    with pytest.raises(ValidationError, match="exceed required"):
+        DatasetAccessRecord(
+            **_access_kwargs(
+                storage_verified=True,
+                storage_available_bytes=1200,
+                storage_required_bytes=1000,
+                storage_margin_bytes=500,
+                storage_evidence_reference="log-1",
+            )
+        )
+
+
+def test_sufficient_storage_capacity_accepted() -> None:
+    record = DatasetAccessRecord(
+        **_access_kwargs(
+            storage_verified=True,
+            storage_available_bytes=1600,
+            storage_required_bytes=1000,
+            storage_margin_bytes=500,
+            storage_evidence_reference="log-1",
+        )
+    )
+    assert record.storage_verified is True
+
+
+def test_storage_verified_false_rejects_partial_evidence() -> None:
+    with pytest.raises(ValidationError, match="must all be None"):
+        DatasetAccessRecord(**_access_kwargs(storage_verified=False, storage_available_bytes=1000))
 
 
 def test_blocked_status_requires_manual_action() -> None:
@@ -469,3 +605,20 @@ def test_pilot_final_conflation_is_detected() -> None:
     assert not gov.line_conflates_pilot(
         "planned controlled RQ5 subset is approximately 20 subjects"
     )
+
+
+def test_normalize_whitespace_collapses_runs() -> None:
+    gov = _load_governance_validator()
+    assert gov.normalize_whitespace("  a\t b\n  c ") == "a b c"
+
+
+def test_governance_records_carry_scope_matched_evidence() -> None:
+    """COBRE size matches its scope; ABIDE and ds000030 keep size unverified."""
+    gov = _load_governance_validator()
+    records = {r.dataset_id: r for r in gov.required_records()}
+    cobre = records["cobre_niak"]
+    assert cobre.size_verified and cobre.size_scope_id == cobre.acquisition_scope_id
+    for rid in ("abide_i_pcp", "ds000030"):
+        assert records[rid].size_verified is False
+        assert records[rid].size_scope_id is None
+        assert records[rid].storage_verified is False

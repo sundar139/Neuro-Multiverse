@@ -143,7 +143,9 @@ def required_records() -> list[DatasetAccessRecord]:
             # re-identification clause. Anonymization is not that clause, so this
             # provider fact is False; the project's own prohibition is separate.
             provider_reidentification_restricted=False,
+            acquisition_scope_id="abide_i_pcp_core_derivative_set",
             expected_size_bytes=None,
+            size_scope_id=None,
             expected_size_source=(
                 "FCP-INDI S3 object listing at acquisition; phenotypic file "
                 "Phenotypic_V1_0b_preprocessed1.csv verified at 449443 bytes"
@@ -152,6 +154,11 @@ def required_records() -> list[DatasetAccessRecord]:
             citation_ids=["ABIDE-I", "Preprocessed Connectomes Project ABIDE derivatives"],
             target_root=f"{DATA_ROOT}/abide_i_pcp",
             hash_algorithm="sha256",
+            hash_manifest_location=f"{DATA_ROOT}/abide_i_pcp/{HASH_MANIFEST_BASENAME}",
+            storage_available_bytes=None,
+            storage_required_bytes=None,
+            storage_margin_bytes=None,
+            storage_evidence_reference=None,
             citation_verified=True,
             size_verified=False,
             storage_verified=False,
@@ -185,21 +192,33 @@ def required_records() -> list[DatasetAccessRecord]:
             redistribution_allowed=False,
             commercial_use_allowed=True,
             provider_reidentification_restricted=False,
-            expected_size_bytes=85127263296,
+            acquisition_scope_id="ds000030_pilot_5_subjects",
+            # The full-snapshot size (85,127,263,296 bytes, OpenNeuro GraphQL) is
+            # informational provider metadata, NOT authorization evidence for the
+            # five-subject pilot. Pilot size stays unverified until the selected
+            # file list has a provider-metadata-derived total for that scope.
+            expected_size_bytes=None,
+            size_scope_id=None,
             expected_size_source=(
-                "OpenNeuro GraphQL snapshot size for tag 1.0.0 (full snapshot). The "
-                f"whole snapshot is NOT acquired: the next unit is a bounded "
-                f"{DS000030_PILOT_SUBJECT_COUNT}-subject pilot whose size is computed "
-                "from per-file snapshot metadata for the selected subjects before download; "
-                f"the planned controlled RQ5 subset is ~{DS000030_PLANNED_RQ5_SUBJECT_COUNT} "
-                "subjects, reached only after the pilot gates pass."
+                "Provider full-snapshot metadata for tag 1.0.0 is 85,127,263,296 bytes "
+                "(OpenNeuro GraphQL), informational only. The whole snapshot is NOT "
+                f"acquired: the next unit is a bounded {DS000030_PILOT_SUBJECT_COUNT}-subject "
+                "pilot whose size is computed from per-file snapshot metadata for the selected "
+                "subjects before download; the planned controlled RQ5 subset is "
+                f"~{DS000030_PLANNED_RQ5_SUBJECT_COUNT} subjects, reached only after pilot gates "
+                "pass."
             ),
             verification_date=VERIFICATION_DATE,
             citation_ids=["OpenNeuro ds000030"],
             target_root=f"{DATA_ROOT}/ds000030",
             hash_algorithm="sha256",
+            hash_manifest_location=f"{DATA_ROOT}/ds000030/{HASH_MANIFEST_BASENAME}",
+            storage_available_bytes=None,
+            storage_required_bytes=None,
+            storage_margin_bytes=None,
+            storage_evidence_reference=None,
             citation_verified=True,
-            size_verified=True,
+            size_verified=False,
             storage_verified=False,
             hash_strategy_verified=True,
             required_manual_action=None,
@@ -235,12 +254,19 @@ def required_records() -> list[DatasetAccessRecord]:
             redistribution_allowed=False,
             commercial_use_allowed=False,
             provider_reidentification_restricted=False,
+            acquisition_scope_id="cobre_niak_lightweight_release_v1",
             expected_size_bytes=657308547,
+            size_scope_id="cobre_niak_lightweight_release_v1",
             expected_size_source="figshare API article 4197885 (297 files, total bytes)",
             verification_date=VERIFICATION_DATE,
             citation_ids=["COBRE", "NIAK COBRE derivative release"],
             target_root=f"{DATA_ROOT}/cobre_niak",
             hash_algorithm="sha256",
+            hash_manifest_location=f"{DATA_ROOT}/cobre_niak/{HASH_MANIFEST_BASENAME}",
+            storage_available_bytes=None,
+            storage_required_bytes=None,
+            storage_margin_bytes=None,
+            storage_evidence_reference=None,
             citation_verified=True,
             size_verified=True,
             storage_verified=False,
@@ -312,6 +338,10 @@ def check(records: list[DatasetAccessRecord]) -> list[str]:
             if record.dataset_id in OPTIONAL_IDS:
                 problems.append(f"{rid}: optional dataset marked acquisition_permitted")
 
+        # READY means access mechanics and authorization are verified. It does
+        # NOT imply size or storage are verified: those are separate prerequisites
+        # gated only at acquisition_permitted. A READY dataset may legitimately
+        # have a pending pilot size.
         if record.access_status is AccessStatus.READY:
             if record.license_id == "":
                 problems.append(f"{rid}: READY dataset lacks a license")
@@ -319,8 +349,6 @@ def check(records: list[DatasetAccessRecord]) -> list[str]:
                 problems.append(f"{rid}: READY dataset must have a VERIFIED license status")
             if not record.citation_ids:
                 problems.append(f"{rid}: READY dataset lacks a citation")
-            if record.expected_size_bytes is None:
-                problems.append(f"{rid}: READY dataset lacks a verified size")
             if not record.target_root:
                 problems.append(f"{rid}: READY dataset lacks a storage target")
             if record.hash_algorithm not in ("sha256", "sha512"):
@@ -355,23 +383,34 @@ def check(records: list[DatasetAccessRecord]) -> list[str]:
                     f"{rid}: snapshot DOI must be a valid versioned OpenNeuro DOI for v{version}"
                 )
 
-        # Explicit prerequisite consistency.
+        # Explicit prerequisite consistency. The typed model already enforces
+        # these at construction; the redundant checks here keep the failure
+        # legible if a future record is built by another path.
         if record.citation_verified and any(c not in verified_topics for c in record.citation_ids):
             problems.append(f"{rid}: citation_verified=true but a citation id is not Verified")
         if record.size_verified and record.expected_size_bytes is None:
             problems.append(f"{rid}: size_verified=true but expected_size_bytes is absent")
-        if record.hash_strategy_verified and record.hash_algorithm not in ("sha256", "sha512"):
-            problems.append(f"{rid}: hash_strategy_verified=true but hash_algorithm unsupported")
-        if record.storage_verified and not _register_documents_capacity(rid):
-            problems.append(
-                f"{rid}: storage_verified=true without documented capacity evidence in the register"
-            )
+        if record.size_verified and record.size_scope_id != record.acquisition_scope_id:
+            problems.append(f"{rid}: size_verified evidence is for a different acquisition scope")
+        if record.hash_strategy_verified:
+            location = record.hash_manifest_location
+            expected_ext = f".{record.hash_algorithm}"
+            if not location or not location.endswith(expected_ext):
+                problems.append(
+                    f"{rid}: hash_strategy_verified=true but manifest location is missing or "
+                    f"does not end with {expected_ext}"
+                )
         # ABIDE-specific: the published usage agreement has no explicit provider
         # re-identification clause, so this provider fact must stay False.
         if rid == "abide_i_pcp" and record.provider_reidentification_restricted:
             problems.append(
                 f"{rid}: provider_reidentification_restricted=true without a verified explicit "
                 "provider re-identification clause"
+            )
+        # The full snapshot size must never be pilot evidence.
+        if rid == "ds000030" and record.size_verified:
+            problems.append(
+                "ds000030: pilot size cannot be verified before a five-subject file-list total"
             )
 
     problems.extend(_check_citation_dois())
@@ -462,21 +501,20 @@ def _section_for(dataset_id: str, sections: dict[str, str]) -> str | None:
     return None
 
 
-def _register_documents_capacity(dataset_id: str) -> bool:
-    """Whether the register section records measured storage capacity evidence."""
-    body = _section_for(dataset_id, _register_sections())
-    if body is None:
-        return False
-    return "capacity" in body.lower() and "measured" in body.lower()
+def normalize_whitespace(text: str) -> str:
+    """Collapse runs of whitespace to single spaces and strip the ends."""
+    return " ".join(text.split())
 
 
 def _check_manual_actions(records: list[DatasetAccessRecord]) -> list[str]:
-    """Structured per-record cross-check of manual actions against the register.
+    """Exact per-record cross-check of manual actions against the register.
 
-    The decision is driven by the typed ``required_manual_action`` field, not a
-    document-wide substring search. Each blocked dataset's register section must
-    state its exact access-status value and carry a manual-action line; a READY
-    section must not present a required authorization action.
+    The decision is driven by the typed ``required_manual_action`` field. For a
+    blocked dataset, that exact text (whitespace-normalized) must appear in the
+    dataset's own register section, which must also state the exact access-status
+    value. A READY dataset must carry no manual action and its section must not
+    present a "Required manual authorization" field. No fuzzy or document-wide
+    matching is used.
     """
     problems: list[str] = []
     sections = _register_sections()
@@ -486,19 +524,28 @@ def _check_manual_actions(records: list[DatasetAccessRecord]) -> list[str]:
         if body is None:
             problems.append(f"{rid}: no acquisition-register section found")
             continue
-        lower = body.lower()
+        normalized_body = normalize_whitespace(body)
         if record.access_status in _BLOCKING_STATES:
+            if record.required_manual_action is None:
+                problems.append(f"{rid}: blocking status carries no required_manual_action")
+                continue
             if record.access_status.value not in body:
                 problems.append(
                     f"{rid}: register section omits the exact access status "
                     f"{record.access_status.value}"
                 )
-            if "required manual authorization:" not in lower and "manual action" not in lower:
-                problems.append(f"{rid}: blocked dataset lacks a manual-action line in its section")
-        elif "required manual authorization:" in lower:
-            problems.append(
-                f"{rid}: READY dataset must not present a required authorization action"
-            )
+            if normalize_whitespace(record.required_manual_action) not in normalized_body:
+                problems.append(
+                    f"{rid}: the exact required_manual_action text is absent from its "
+                    "register section"
+                )
+        else:
+            if record.required_manual_action is not None:
+                problems.append(f"{rid}: READY dataset must not carry a required_manual_action")
+            if "required manual authorization:" in body.lower():
+                problems.append(
+                    f"{rid}: READY dataset section must not present a required authorization field"
+                )
     return problems
 
 
@@ -564,6 +611,19 @@ def main() -> int:
                 "license_status": r.license_status.value,
                 "repository_license_id": r.repository_license_id,
                 "upstream_license_ids": r.upstream_license_ids,
+                "acquisition_scope_id": r.acquisition_scope_id,
+                "size_scope_id": r.size_scope_id,
+                "expected_size_bytes": r.expected_size_bytes,
+                "hash_manifest_location": r.hash_manifest_location,
+                "storage_evidence_complete": all(
+                    v is not None
+                    for v in (
+                        r.storage_available_bytes,
+                        r.storage_required_bytes,
+                        r.storage_margin_bytes,
+                        r.storage_evidence_reference,
+                    )
+                ),
                 "prerequisites": {
                     "citation_verified": r.citation_verified,
                     "size_verified": r.size_verified,

@@ -21,9 +21,10 @@ The external data root is portable and is expressed as `$HOME/neuromultiverse-da
 - **Provider terms:** Creative Commons Attribution-NonCommercial-Share Alike (CC BY-NC-SA 3.0). The provider states the data are anonymized (HIPAA-oriented procedures) and contain no protected health information, requires non-commercial use, attribution and share-alike on redistribution, and NITRC + 1000 FCP/INDI registration. The published usage-agreement page does not state an explicit contractual re-identification prohibition; anonymization is not equivalent to such a clause, so no provider re-identification clause is asserted here.
 - **Project standing prohibition:** Independently of provider terms, the NeuroMultiverse protocol prohibits any re-identification attempt, forbids public redistribution of participant-level data, keeps no participant-level file in Git, and permits only secondary research and disclosure-safe aggregate outputs.
 - **Citation obligations:** ABIDE-I — Di Martino et al. 2014 (DOI 10.1038/mp.2013.78). PCP derivatives — Craddock et al. 2013, The Neuro Bureau Preprocessing Initiative (DOI 10.3389/conf.fninf.2013.09.00041). Both are recorded and Verified in the citation inventory and must both be cited.
+- **Acquisition scope:** `abide_i_pcp_core_derivative_set` (the exact file set the next acquisition would retrieve).
 - **Access status:** MANUAL_AUTHORIZATION_REQUIRED. The derivative objects are readable from the public FCP-INDI S3 bucket, but the governing ABIDE-I terms still require registration and acceptance; public object-store reachability does not remove them.
-- **Prerequisites:** citation verified; hash strategy verified (SHA-256); size verification pending (computed from S3 listing at acquisition); storage verification pending.
-- **Required manual authorization:** Create or sign into a NITRC account; join the 1000 Functional Connectomes Project / INDI resource; be logged in and in compliance with CC BY-NC-SA at download time.
+- **Prerequisites:** citation verified; hash strategy verified (SHA-256, external manifest below); size verification **pending** (no scope-matched total yet; computed from the S3 listing at acquisition); storage verification **pending**.
+- **Required manual authorization:** Register a NITRC account and join the 1000 Functional Connectomes Project / INDI resource, then be logged in at download time.
 - **Planned acquisition subset:** Per-subject ROI time series for atlases `rois_aal` and `rois_cc200` across pipelines `ccs`, `cpac`, `dparsf`, `niak`, plus the phenotypic and quality-control table, for the common-subject cohort defined in the protocol. The cohort is not frozen in this record.
 - **Expected size:** Computed from the FCP-INDI S3 object listing at acquisition time (per-object sizes are provider-reported; sample `rois_cc200` files measured ~0.47 MB each). The phenotypic file `Phenotypic_V1_0b_preprocessed1.csv` was HEAD-probed at 449,443 bytes.
 - **External target root:** `$HOME/neuromultiverse-data/abide_i_pcp`
@@ -47,9 +48,10 @@ The external data root is portable and is expressed as `$HOME/neuromultiverse-da
 - **Authoritative sources:** OpenNeuro dataset page (`openneuro.org/datasets/ds000030/versions/1.0.0`); OpenNeuro GraphQL snapshot metadata (`openneuro.org/crn/graphql`).
 - **License / data-use summary:** CC0 public-domain dedication, read from the snapshot metadata. No registration or agreement required.
 - **Citation obligations:** OpenNeuro ds000030 snapshot 1.0.0 (dataset DOI above). The provider `HowToAcknowledge` additionally requires citing Poldrack et al. 2016, Scientific Data (DOI 10.1038/sdata.2016.110). Both are recorded and Verified in the citation inventory.
+- **Acquisition scope:** `ds000030_pilot_5_subjects` — the next acquisition is the five-subject pilot, not the full snapshot.
 - **Access status:** READY. Public download; no authentication required for the pinned snapshot.
 - **Manual authorization:** None required (public CC0 snapshot); confirm the selected snapshot `1.0.0`.
-- **Prerequisites:** citation verified; full-snapshot size verified; hash strategy verified (SHA-256); storage verification pending; five-subject pilot metadata-size review pending.
+- **Prerequisites:** citation verified; hash strategy verified (SHA-256, external manifest below); **pilot size verification pending and currently false** — the full-snapshot total is informational only and cannot authorize the five-subject pilot; storage verification pending.
 - **Planned controlled RQ5 subset:** Approximately 20 subjects (T1-weighted and resting-state BOLD, with sidecar metadata), per the protocol. The resting-state BOLD modality is confirmed present (`task-rest_bold.json` in the snapshot). This subset is reached only after the pilot gates pass; subject selection is not frozen in this record.
 - **Next bounded acquisition pilot:** Exactly 5 subjects. The five subjects are not selected or frozen in this governance task. The whole 85 GB snapshot is not acquired.
 - **Expected size:** Full snapshot size is 85,127,263,296 bytes (provider-reported via OpenNeuro GraphQL). The 5-subject pilot size is computed from per-file snapshot metadata for the selected subjects before download; the whole dataset is not downloaded.
@@ -77,9 +79,10 @@ The external data root is portable and is expressed as `$HOME/neuromultiverse-da
 - **License verification status:** **CONFLICT.** The repository license (CC BY 4.0) is more permissive than the stated upstream license (CC BY-NC). This is not resolved by selecting the less restrictive term.
 - **Effective project restriction (conservative):** Non-commercial, no redistribution, attribution required, until the conflict is authoritatively reconciled.
 - **Citation obligations:** NIAK derivative — Bellec 2016 (figshare DOI above). COBRE — Aine et al. 2017 (DOI 10.1007/s12021-017-9338-9). Both are recorded and Verified in the citation inventory.
+- **Acquisition scope:** `cobre_niak_lightweight_release_v1` — the full lightweight release; size is verified for this same scope (657,308,547 bytes, figshare API). Storage verification remains pending.
 - **Access mechanics:** Publicly reachable on figshare without authentication.
 - **Access status:** **SOURCE_AMBIGUOUS** — public reachability does not make the governing license unambiguous.
-- **Required manual authorization:** Obtain written clarification from the derivative publisher or repository (figshare / SIMEXP / P. Bellec) on the relationship between the figshare CC BY 4.0 metadata and the upstream COBRE Attribution-NonCommercial terms. Until then, treat the release as non-commercial and non-redistributable.
+- **Required manual authorization:** Obtain written clarification from the derivative publisher on the figshare CC BY 4.0 vs upstream COBRE CC BY-NC layered-license conflict. Until then, treat the release as non-commercial and non-redistributable.
 - **Planned acquisition subset:** The full lightweight derivative (preprocessed resting-state fMRI in MNI space, per-subject confound/time-series tables, and the accompanying phenotype table). Local usable counts are determined at analysis time, not here.
 - **Expected size:** 657,308,547 bytes across 297 files (figshare API article 4197885).
 - **External target root:** `$HOME/neuromultiverse-data/cobre_niak`

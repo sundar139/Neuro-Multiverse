@@ -63,8 +63,8 @@ Governance verification is tracked separately from acquisition readiness. A data
 | Citation verified | Yes | Yes | Yes |
 | Access authorization verified | No — manual NITRC + INDI registration required | Yes (public, no auth) | Access mechanics public, but license status ambiguous → not verified |
 | Storage verified | Pending (target root not yet provisioned) | Pending (target root not yet provisioned) | Pending (target root not yet provisioned) |
-| Size verified | Method fixed (S3 listing at acquisition) | Yes (provider-reported full size; pilot subset computed at acquisition) | Yes (figshare API) |
-| Hash strategy verified | Yes (SHA-256) | Yes (SHA-256) | Yes (SHA-256) |
+| Size verified | Pending (scope `abide_i_pcp_core_derivative_set`; computed from S3 listing at acquisition) | Pending for the five-subject pilot scope (full-snapshot 85 GB total is informational only) | Yes for scope `cobre_niak_lightweight_release_v1` (657,308,547 bytes, figshare API) |
+| Hash strategy verified | Yes (SHA-256, external `$HOME/…/abide_i_pcp/checksums.sha256`) | Yes (SHA-256, external `$HOME/…/ds000030/checksums.sha256`) | Yes (SHA-256, external `$HOME/…/cobre_niak/checksums.sha256`) |
 | Ready for acquisition | No | No — awaiting governance-gate approval | No — license conflict must be resolved first |
 
 No dataset is marked ready for acquisition. The full per-dataset record is in [acquisition_register.md](acquisition_register.md).
