@@ -83,6 +83,11 @@ DS000030_PLANNED_RQ5_SUBJECT_COUNT = 20
 # local to the preflight record.
 DS000030_STORAGE_AVAILABLE_BYTES = 996303314944
 DS000030_APPROVAL_REFERENCE = "nm-ds000030-pilot-20260718-chatgpt-audit-001"
+DS000030_ACQUISITION_REFERENCE = (
+    "ds000030-pilot-acquisition-sha256:"
+    "e2b194394687738f62b199539cdc7acca6627b40fcd6a4fbb45143891b7410ea"
+)
+DS000030_ACQUISITION_COMPLETED_AT = "2026-07-18T07:34:41.416478Z"
 APPROVED_EXECUTOR_FILE_SHA256 = {
     "scripts/acquire_ds000030_pilot.py": (
         "63a4d7bc699a63f09b1daac4d3703d1ef0716aa0133371e5ddb3855da0ce219f"
@@ -256,6 +261,9 @@ def required_records() -> list[DatasetAccessRecord]:
             independent_approval_reference=DS000030_APPROVAL_REFERENCE,
             required_manual_action=None,
             acquisition_permitted=True,
+            acquisition_completed=True,
+            acquisition_evidence_reference=DS000030_ACQUISITION_REFERENCE,
+            acquisition_completed_at_utc=DS000030_ACQUISITION_COMPLETED_AT,
         ),
         DatasetAccessRecord(
             dataset_id="cobre_niak",
@@ -638,6 +646,14 @@ def check(records: list[DatasetAccessRecord]) -> list[str]:
                 problems.append("ds000030: independent approval reference mismatch")
             if not record.independent_approval_verified or not record.acquisition_permitted:
                 problems.append("ds000030: approved pilot must be acquisition-permitted")
+            if (
+                not record.acquisition_completed
+                or record.acquisition_evidence_reference != DS000030_ACQUISITION_REFERENCE
+                or record.acquisition_completed_at_utc is None
+                or record.acquisition_completed_at_utc.isoformat().replace("+00:00", "Z")
+                != DS000030_ACQUISITION_COMPLETED_AT
+            ):
+                problems.append("ds000030: completed pilot acquisition evidence mismatch")
         elif (
             record.independent_approval_verified
             or record.independent_approval_reference is not None
@@ -875,6 +891,13 @@ def main() -> int:
                 },
                 "required_manual_action_present": r.required_manual_action is not None,
                 "acquisition_permitted": r.acquisition_permitted,
+                "acquisition_completed": r.acquisition_completed,
+                "acquisition_evidence_reference": r.acquisition_evidence_reference,
+                "acquisition_completed_at_utc": (
+                    r.acquisition_completed_at_utc.isoformat()
+                    if r.acquisition_completed_at_utc
+                    else None
+                ),
             }
             for r in records
         ],

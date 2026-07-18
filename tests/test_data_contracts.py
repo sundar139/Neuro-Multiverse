@@ -180,6 +180,29 @@ def test_permitted_ready_with_all_prerequisites_is_allowed() -> None:
     assert record.acquisition_permitted is True
 
 
+def test_completed_acquisition_requires_evidence_and_time() -> None:
+    with pytest.raises(ValidationError, match="evidence reference"):
+        DatasetAccessRecord(**_permittable_kwargs(acquisition_completed=True))
+
+
+def test_completed_acquisition_accepts_opaque_evidence() -> None:
+    record = DatasetAccessRecord(
+        **_permittable_kwargs(
+            acquisition_completed=True,
+            acquisition_evidence_reference="synthetic-acquisition-sha256:" + "a" * 64,
+            acquisition_completed_at_utc=datetime(2026, 7, 18, tzinfo=UTC),
+        )
+    )
+    assert record.acquisition_completed is True
+
+
+def test_incomplete_acquisition_rejects_completion_evidence() -> None:
+    with pytest.raises(ValidationError, match="incomplete acquisition"):
+        DatasetAccessRecord(
+            **_permittable_kwargs(acquisition_evidence_reference="synthetic-evidence")
+        )
+
+
 def test_verified_approval_requires_reference() -> None:
     with pytest.raises(ValidationError, match="approval reference"):
         DatasetAccessRecord(**_access_kwargs(independent_approval_verified=True))
@@ -710,6 +733,8 @@ def test_governance_records_carry_scope_matched_evidence() -> None:
     assert ds.storage_verified is True and ds.storage_scope_id == ds.acquisition_scope_id
     assert ds.acquisition_permitted is True and ds.independent_approval_verified is True
     assert ds.independent_approval_reference == gov.DS000030_APPROVAL_REFERENCE
+    assert ds.acquisition_completed is True
+    assert ds.acquisition_evidence_reference == gov.DS000030_ACQUISITION_REFERENCE
     assert records["cobre_niak"].storage_verified is False
     for rid, rec in records.items():
         if rid == "ds000030":
@@ -717,3 +742,5 @@ def test_governance_records_carry_scope_matched_evidence() -> None:
         assert rec.acquisition_permitted is False
         assert rec.independent_approval_verified is False
         assert rec.independent_approval_reference is None
+        assert rec.acquisition_completed is False
+        assert rec.acquisition_evidence_reference is None

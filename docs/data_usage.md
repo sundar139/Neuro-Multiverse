@@ -65,13 +65,13 @@ Governance verification is tracked separately from acquisition readiness. A data
 | Storage verified | Pending (target root not yet provisioned) | Yes for scope `ds000030_pilot_5_subjects` (external root provisioned; available 996,303,314,944 bytes clears transfer + 250 GiB reserve; measured 2026-07-18) | Pending (target root not yet provisioned) |
 | Size verified | Pending (scope `abide_i_pcp_core_derivative_set`; computed from S3 listing at acquisition) | Yes for scope `ds000030_pilot_5_subjects` (22 files, 187,570,603 bytes from OpenNeuro metadata; full 85 GB snapshot is informational only) | Yes for scope `cobre_niak_lightweight_release_v1` (657,308,547 bytes, figshare API) |
 | Hash strategy verified | Yes (SHA-256, external `$HOME/…/abide_i_pcp/checksums.sha256`) | Yes (SHA-256, external `$HOME/…/ds000030/checksums.sha256`) | Yes (SHA-256, external `$HOME/…/cobre_niak/checksums.sha256`) |
-| Ready for acquisition | No | **Yes — bounded five-subject pilot only** | No — license conflict must be resolved first |
+| Ready for acquisition | No | **Completed — bounded five-subject pilot only** | No — license conflict must be resolved first |
 
-Only the bounded ds000030 five-subject pilot is marked ready for acquisition. The full per-dataset record is in [acquisition_register.md](acquisition_register.md).
+Only the bounded ds000030 five-subject pilot has completed acquisition. The full per-dataset record is in [acquisition_register.md](acquisition_register.md).
 
-**ds000030 scope.** The planned controlled RQ5 subset is approximately 20 subjects, separate and not authorized. The bounded acquisition unit is a pilot of exactly 5 subjects. On 2026-07-18 the reviewed executor, zero-body preflight, exact plan, and storage evidence were independently approved under `nm-ds000030-pilot-20260718-chatgpt-audit-001`. Authorization is limited to ds000030 snapshot 1.0.0, scope `ds000030_pilot_5_subjects`, 22 files, and 187570603 bytes. ABIDE, COBRE, and scaling to approximately 20 subjects remain unauthorized. The actual transfer has not occurred, and `--execute` remains prohibited during authorization setup.
+**ds000030 scope.** The bounded five-subject pilot completed on 2026-07-18 under approval `nm-ds000030-pilot-20260718-chatgpt-audit-001`: exactly 22 approved files and 187,570,603 bytes. The external manifest contains 22 verified SHA-256 entries; independent recomputation matched every file. There were zero partials, quarantined files, or integrity failures, and one successful completed run. No participant table, phenotype, behavioral, events, or confound file was acquired, and no downloaded content was inspected. Evidence: `ds000030-pilot-acquisition-sha256:e2b194394687738f62b199539cdc7acca6627b40fcd6a4fbb45143891b7410ea`.
 
-After the external approval record is created, `--validate-execution` must pass as the zero-body final approval check. Any later repository commit invalidates that exact-HEAD-bound record. No acquisition has occurred.
+The approval covered only this completed transfer. This evidence commit invalidates its exact-HEAD binding for future execution; any resume or additional acquisition requires a new approval. ABIDE, COBRE, and the approximately 20-subject expansion remain unauthorized.
 
 ## 4. Standing prohibitions
 

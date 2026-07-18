@@ -54,10 +54,10 @@ The external data root is portable and is expressed as `$HOME/neuromultiverse-da
 - **Prerequisites:** citation verified; hash strategy verified (SHA-256, external manifest below); **pilot size verified** for scope `ds000030_pilot_5_subjects`; **storage verified** for the same scope. The full-snapshot total remains informational and did not authorize the pilot.
 - **Storage preflight:** The external ds000030 root was provisioned and its free capacity measured on 2026-07-18 (no dataset body downloaded). Available capacity 996,303,314,944 bytes clears the planned transfer plus the 250 GiB (268,435,456,000-byte) controlled-processing reserve. Evidence: `storage-readiness-sha256:3d28205a55ed386c8b5f5ac1bbb123c8d5efc505e11ee55a612d52ce90fd6acd` (external, mode 600, never committed).
 - **Five-subject pilot plan:** Generated from OpenNeuro metadata only. Exact planned file count **22**; exact planned transfer **187,570,603 bytes** (sum of provider-reported sizes for the five selected subjects: dataset metadata, T1w image + sidecar, resting-state BOLD image + sidecar). Selected subject identifiers are retained only in the external plan (mode 600) and never enter Git. The plan is validated by the strict `PilotAcquisitionPlan` schema and **contains no persisted download URL**; at execution time each URL is resolved from the official OpenNeuro metadata endpoint, HTTPS/host-validated, and never persisted. Plan evidence (schema v2, URL-free): `ds000030-pilot-plan-sha256:fb7f62583f00ade72dcba6f85a394c0413516bf949913f31ea68471c3cda0709`.
-- **Execution gate:** The reviewed 22-file, 187570603-byte pilot was independently approved on 2026-07-18 under `nm-ds000030-pilot-20260718-chatgpt-audit-001`. Authorization is limited to ds000030 snapshot 1.0.0, scope `ds000030_pilot_5_subjects`, and the committed plan/storage evidence. The external approval record must bind exact `HEAD`; any later commit invalidates it. The committed template remains `decision: not_approved`, and no transfer has occurred.
-- **Mandatory zero-body preflight:** After the external approval record is created, `--validate-execution` must pass before transfer. `--execute` is prohibited during this authorization work.
+- **Acquisition result:** The authorized pilot completed on 2026-07-18: 22 files, 187,570,603 bytes, 22 valid manifest SHA-256 entries, zero partials, zero quarantined files, zero integrity failures, and one completed run. No participant, phenotype, behavioral, events, or confound file was acquired; downloaded contents were not inspected. Evidence: `ds000030-pilot-acquisition-sha256:e2b194394687738f62b199539cdc7acca6627b40fcd6a4fbb45143891b7410ea`.
+- **Future execution gate:** The approval served only this completed transfer. This evidence commit changes exact `HEAD`, so future acquisition or resume requires a new approval. The approximately 20-subject expansion remains unauthorized.
 - **Planned controlled RQ5 subset:** Approximately 20 subjects (T1-weighted and resting-state BOLD, with sidecar metadata), per the protocol. The resting-state BOLD modality is confirmed present (`task-rest_bold.json` in the snapshot). This subset is reached only after the pilot gates pass; it is separate from the pilot and is not selected or frozen.
-- **Next bounded acquisition pilot:** Exactly 5 subjects. The whole 85 GB snapshot is not acquired; the pilot transfers only the 22 files above. The acquisition tool `scripts/acquire_ds000030_pilot.py` was run in `--dry-run` only; no dataset body or byte range was downloaded.
+- **Completed bounded acquisition pilot:** Exactly 5 subjects and the 22 reviewed files above. The whole 85 GB snapshot was not acquired.
 - **Expected size:** Pilot transfer is 187,570,603 bytes (scope `ds000030_pilot_5_subjects`). The full snapshot total of 85,127,263,296 bytes (provider-reported via OpenNeuro GraphQL) is informational only and is not acquired.
 - **External raw target:** `$HOME/neuromultiverse-data/ds000030/raw`
 - **Hash algorithm:** SHA-256
@@ -67,7 +67,7 @@ The external data root is portable and is expressed as `$HOME/neuromultiverse-da
 - **Re-identification prohibition:** No re-identification attempt permitted; raw imaging never enters version control.
 - **Approval status:** Independently approved for the bounded pilot only.
 - **Approval date:** 2026-07-18.
-- **Acquisition permitted:** Yes, limited to the exact reviewed pilot; transfer has not occurred.
+- **Acquisition permitted:** The exact reviewed pilot completed; no further transfer is authorized by the served approval.
 - **Approval reference:** `nm-ds000030-pilot-20260718-chatgpt-audit-001`.
 
 ---
@@ -114,4 +114,4 @@ Neither optional dataset is permitted for acquisition, and neither appears as a 
 
 ## Acquisition gate
 
-Only the exact ds000030 five-subject pilot is permitted for acquisition. Scaling to approximately 20 subjects is not authorized. ABIDE-I PCP remains blocked on manual NITRC + INDI authorization. COBRE NIAK remains blocked by its unresolved layered-license conflict. No transfer has occurred.
+The exact ds000030 five-subject pilot completed successfully. Scaling to approximately 20 subjects is not authorized. ABIDE-I PCP remains blocked on manual NITRC + INDI authorization. COBRE NIAK remains blocked by its unresolved layered-license conflict.

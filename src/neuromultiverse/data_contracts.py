@@ -21,7 +21,7 @@ subject-manifest model is a schema for a future manifest, not a manifest.
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 
@@ -226,6 +226,9 @@ class DatasetAccessRecord(BaseModel):
     # Present (nonblank) exactly when access is gated; ``None`` when READY.
     required_manual_action: str | None = None
     acquisition_permitted: bool
+    acquisition_completed: bool = False
+    acquisition_evidence_reference: str | None = None
+    acquisition_completed_at_utc: datetime | None = None
 
     @model_validator(mode="after")
     def _check_invariants(self) -> DatasetAccessRecord:
@@ -385,6 +388,21 @@ class DatasetAccessRecord(BaseModel):
                 raise ValueError("acquisition_permitted requires required_manual_action is None")
             if not self.independent_approval_reference:
                 raise ValueError("acquisition_permitted requires an independent approval reference")
+
+        evidence = self.acquisition_evidence_reference
+        completed_at = self.acquisition_completed_at_utc
+        if self.acquisition_completed:
+            if not self.acquisition_permitted:
+                raise ValueError("acquisition_completed requires acquisition_permitted")
+            if not (evidence and evidence.strip()) or "/" in evidence or "\\" in evidence:
+                raise ValueError("completed acquisition requires an opaque evidence reference")
+            _reject_home_paths(evidence, "acquisition_evidence_reference")
+            if completed_at is None or completed_at.utcoffset() is None:
+                raise ValueError("completed acquisition requires a timezone-aware completion time")
+            if blocking:
+                raise ValueError("a completed acquisition cannot be attached to blocked access")
+        elif evidence is not None or completed_at is not None:
+            raise ValueError("incomplete acquisition cannot carry completion evidence")
         return self
 
 
