@@ -55,6 +55,7 @@ def _access_kwargs(**overrides: Any) -> dict[str, Any]:
         "acquisition_scope_id": "synthetic_scope",
         "expected_size_bytes": 1024,
         "size_scope_id": "synthetic_scope",
+        "size_evidence_reference": "synthetic-plan-sha256:deadbeef",
         "expected_size_source": "provider metadata API",
         "verification_date": date(2026, 7, 17),
         "citation_ids": ["synthetic-cite"],
@@ -65,10 +66,12 @@ def _access_kwargs(**overrides: Any) -> dict[str, Any]:
         "storage_required_bytes": None,
         "storage_margin_bytes": None,
         "storage_evidence_reference": None,
+        "storage_scope_id": None,
         "citation_verified": True,
         "size_verified": True,
         "storage_verified": False,
         "hash_strategy_verified": True,
+        "independent_approval_verified": False,
         "required_manual_action": None,
         "acquisition_permitted": False,
     }
@@ -151,16 +154,21 @@ def test_permitted_requires_verified_size() -> None:
 
 _VALID_STORAGE = {
     "storage_verified": True,
-    "storage_available_bytes": 2000,
-    "storage_required_bytes": 1000,
-    "storage_margin_bytes": 500,
-    "storage_evidence_reference": "acquisition-log-0001",
+    "storage_available_bytes": 300000000000,
+    "storage_required_bytes": 2000,
+    "storage_margin_bytes": 268435456000,
+    "storage_evidence_reference": "storage-readiness-sha256:abc",
+    "storage_scope_id": "synthetic_scope",
 }
 
 
 def _permittable_kwargs(**overrides: Any) -> dict[str, Any]:
     """Fixture with every acquisition prerequisite satisfied (permittable)."""
-    base = _access_kwargs(**_VALID_STORAGE, acquisition_permitted=True)
+    base = _access_kwargs(
+        **_VALID_STORAGE,
+        independent_approval_verified=True,
+        acquisition_permitted=True,
+    )
     base.update(overrides)
     return base
 
@@ -177,7 +185,15 @@ def test_citation_verified_false_blocks_acquisition() -> None:
 
 def test_size_verified_false_blocks_acquisition() -> None:
     with pytest.raises(ValidationError, match="prerequisites"):
-        DatasetAccessRecord(**_permittable_kwargs(size_verified=False, size_scope_id=None))
+        DatasetAccessRecord(
+            **_access_kwargs(
+                acquisition_permitted=True,
+                independent_approval_verified=True,
+                size_verified=False,
+                size_scope_id=None,
+                size_evidence_reference=None,
+            )
+        )
 
 
 def test_storage_verified_false_blocks_acquisition() -> None:
@@ -261,6 +277,52 @@ def test_manifest_location_rejects_absolute_user_path() -> None:
         )
 
 
+def test_hash_manifest_must_be_under_target_root() -> None:
+    with pytest.raises(ValidationError, match="under target_root"):
+        DatasetAccessRecord(
+            **_access_kwargs(
+                hash_manifest_location="$HOME/neuromultiverse-data/other/checksums.sha256"
+            )
+        )
+
+
+def test_relative_hash_manifest_rejected() -> None:
+    with pytest.raises(ValidationError, match="under target_root"):
+        DatasetAccessRecord(**_access_kwargs(hash_manifest_location="checksums.sha256"))
+
+
+def test_target_root_must_be_under_approved_root() -> None:
+    with pytest.raises(ValidationError, match="target_root must be under"):
+        DatasetAccessRecord(
+            **_access_kwargs(
+                target_root="$HOME/elsewhere/synthetic",
+                hash_manifest_location="$HOME/elsewhere/synthetic/checksums.sha256",
+            )
+        )
+
+
+def test_size_evidence_reference_required_when_size_verified() -> None:
+    with pytest.raises(ValidationError, match="size_evidence_reference"):
+        DatasetAccessRecord(**_access_kwargs(size_evidence_reference=None))
+
+
+def test_size_evidence_reference_absent_when_unverified() -> None:
+    with pytest.raises(ValidationError, match="size_evidence_reference must be None"):
+        DatasetAccessRecord(
+            **_access_kwargs(
+                size_verified=False,
+                size_scope_id=None,
+                expected_size_bytes=None,
+                size_evidence_reference="synthetic-plan-sha256:x",
+            )
+        )
+
+
+def test_independent_approval_required_for_acquisition() -> None:
+    with pytest.raises(ValidationError, match="independent_approval_verified"):
+        DatasetAccessRecord(**_permittable_kwargs(independent_approval_verified=False))
+
+
 def test_storage_verified_requires_all_evidence() -> None:
     with pytest.raises(ValidationError, match="all storage-evidence"):
         DatasetAccessRecord(**_access_kwargs(storage_verified=True, storage_available_bytes=1000))
@@ -268,41 +330,34 @@ def test_storage_verified_requires_all_evidence() -> None:
 
 def test_zero_storage_margin_rejected() -> None:
     with pytest.raises(ValidationError, match="storage_margin_bytes"):
-        DatasetAccessRecord(
-            **_access_kwargs(
-                storage_verified=True,
-                storage_available_bytes=2000,
-                storage_required_bytes=1000,
-                storage_margin_bytes=0,
-                storage_evidence_reference="log-1",
-            )
-        )
+        DatasetAccessRecord(**_access_kwargs(**{**_VALID_STORAGE, "storage_margin_bytes": 0}))
 
 
 def test_insufficient_storage_capacity_rejected() -> None:
     with pytest.raises(ValidationError, match="exceed required"):
-        DatasetAccessRecord(
-            **_access_kwargs(
-                storage_verified=True,
-                storage_available_bytes=1200,
-                storage_required_bytes=1000,
-                storage_margin_bytes=500,
-                storage_evidence_reference="log-1",
-            )
-        )
+        DatasetAccessRecord(**_access_kwargs(**{**_VALID_STORAGE, "storage_available_bytes": 2000}))
 
 
 def test_sufficient_storage_capacity_accepted() -> None:
-    record = DatasetAccessRecord(
-        **_access_kwargs(
-            storage_verified=True,
-            storage_available_bytes=1600,
-            storage_required_bytes=1000,
-            storage_margin_bytes=500,
-            storage_evidence_reference="log-1",
-        )
-    )
+    record = DatasetAccessRecord(**_access_kwargs(**_VALID_STORAGE))
     assert record.storage_verified is True
+
+
+def test_storage_required_must_be_at_least_expected() -> None:
+    with pytest.raises(ValidationError, match="storage_required_bytes"):
+        DatasetAccessRecord(**_access_kwargs(**{**_VALID_STORAGE, "storage_required_bytes": 500}))
+
+
+def test_storage_scope_must_match_acquisition_scope() -> None:
+    with pytest.raises(ValidationError, match="storage_scope_id must equal"):
+        DatasetAccessRecord(
+            **_access_kwargs(**{**_VALID_STORAGE, "storage_scope_id": "other_scope"})
+        )
+
+
+def test_storage_scope_id_none_when_unverified() -> None:
+    with pytest.raises(ValidationError, match="must all be None"):
+        DatasetAccessRecord(**_access_kwargs(storage_scope_id="synthetic_scope"))
 
 
 def test_storage_verified_false_rejects_partial_evidence() -> None:
@@ -613,12 +668,18 @@ def test_normalize_whitespace_collapses_runs() -> None:
 
 
 def test_governance_records_carry_scope_matched_evidence() -> None:
-    """COBRE size matches its scope; ABIDE and ds000030 keep size unverified."""
+    """Every verified size is scope-matched; ds000030 pilot storage is verified;
+    no record is acquisition-permitted or independently approved yet."""
     gov = _load_governance_validator()
     records = {r.dataset_id: r for r in gov.required_records()}
-    cobre = records["cobre_niak"]
-    assert cobre.size_verified and cobre.size_scope_id == cobre.acquisition_scope_id
-    for rid in ("abide_i_pcp", "ds000030"):
-        assert records[rid].size_verified is False
-        assert records[rid].size_scope_id is None
-        assert records[rid].storage_verified is False
+    for rid in ("cobre_niak", "ds000030"):
+        rec = records[rid]
+        assert rec.size_verified and rec.size_scope_id == rec.acquisition_scope_id
+    abide = records["abide_i_pcp"]
+    assert abide.size_verified is False and abide.size_scope_id is None
+    ds = records["ds000030"]
+    assert ds.storage_verified is True and ds.storage_scope_id == ds.acquisition_scope_id
+    assert records["cobre_niak"].storage_verified is False
+    for rec in records.values():
+        assert rec.acquisition_permitted is False
+        assert rec.independent_approval_verified is False

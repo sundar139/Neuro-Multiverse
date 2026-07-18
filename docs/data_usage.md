@@ -62,14 +62,14 @@ Governance verification is tracked separately from acquisition readiness. A data
 | License verified | Yes (CC BY-NC-SA 3.0) | Yes (CC0) | **No — CONFLICT** (figshare CC BY 4.0 vs upstream CC BY-NC) |
 | Citation verified | Yes | Yes | Yes |
 | Access authorization verified | No — manual NITRC + INDI registration required | Yes (public, no auth) | Access mechanics public, but license status ambiguous → not verified |
-| Storage verified | Pending (target root not yet provisioned) | Pending (target root not yet provisioned) | Pending (target root not yet provisioned) |
-| Size verified | Pending (scope `abide_i_pcp_core_derivative_set`; computed from S3 listing at acquisition) | Pending for the five-subject pilot scope (full-snapshot 85 GB total is informational only) | Yes for scope `cobre_niak_lightweight_release_v1` (657,308,547 bytes, figshare API) |
+| Storage verified | Pending (target root not yet provisioned) | Yes for scope `ds000030_pilot_5_subjects` (external root provisioned; available 996,303,314,944 bytes clears transfer + 250 GiB reserve; measured 2026-07-18) | Pending (target root not yet provisioned) |
+| Size verified | Pending (scope `abide_i_pcp_core_derivative_set`; computed from S3 listing at acquisition) | Yes for scope `ds000030_pilot_5_subjects` (22 files, 187,570,603 bytes from OpenNeuro metadata; full 85 GB snapshot is informational only) | Yes for scope `cobre_niak_lightweight_release_v1` (657,308,547 bytes, figshare API) |
 | Hash strategy verified | Yes (SHA-256, external `$HOME/…/abide_i_pcp/checksums.sha256`) | Yes (SHA-256, external `$HOME/…/ds000030/checksums.sha256`) | Yes (SHA-256, external `$HOME/…/cobre_niak/checksums.sha256`) |
 | Ready for acquisition | No | No — awaiting governance-gate approval | No — license conflict must be resolved first |
 
 No dataset is marked ready for acquisition. The full per-dataset record is in [acquisition_register.md](acquisition_register.md).
 
-**ds000030 scope.** The planned controlled RQ5 subset is approximately 20 subjects. The next bounded acquisition unit is a pilot of exactly 5 subjects; those subjects are not selected or frozen in this governance task. Scaling from 5 to approximately 20 subjects occurs only after pilot acquisition, integrity, BIDS, preprocessing smoke tests, runtime, storage, and governance gates pass. The whole 85 GB snapshot is not acquired; the pilot size is computed from provider file metadata for the five selected subjects before download.
+**ds000030 scope.** The planned controlled RQ5 subset is approximately 20 subjects, separate and not selected. The bounded acquisition unit is a pilot of exactly 5 subjects. A metadata-only preflight (2026-07-18) provisioned the external root, measured capacity, and generated a five-subject plan of 22 files totalling 187,570,603 bytes; the plan and storage-readiness records live outside Git (mode 600) and are referenced only by opaque SHA-256 digests. Selected subject identifiers are never committed. **No dataset body was downloaded** — the acquisition tool ran in `--dry-run` only. Acquisition remains **unapproved and prohibited** (`independent_approval_verified=false`, `acquisition_permitted=false`); scaling from 5 to ~20 subjects occurs only after pilot acquisition, integrity, BIDS, preprocessing smoke tests, runtime, storage, and governance gates pass.
 
 ## 4. Standing prohibitions
 

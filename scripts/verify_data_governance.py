@@ -69,6 +69,25 @@ OPTIONAL_IDS = frozenset({"cobre_raw", "aomic_id1000"})
 DS000030_PILOT_SUBJECT_COUNT = 5
 DS000030_PLANNED_RQ5_SUBJECT_COUNT = 20
 
+# Controlled raw-processing free-space reserve (250 GiB), used as the storage
+# margin required before any acquisition.
+CONTROLLED_RESERVE_BYTES = 268435456000
+
+# Aggregate, disclosure-safe pilot evidence, transcribed from the external
+# metadata-only preflight (no participant identifier, no external absolute path).
+# The exact transfer total is the sum of provider-reported file sizes for the
+# five-subject plan; the references are opaque SHA-256 digests of the external
+# plan and storage-readiness records.
+DS000030_PILOT_FILE_COUNT = 22
+DS000030_PILOT_EXPECTED_BYTES = 187570603
+DS000030_STORAGE_AVAILABLE_BYTES = 996303314944
+DS000030_PILOT_PLAN_REFERENCE = (
+    "ds000030-pilot-plan-sha256:c6a86234b90b94b184dbb5adc5c6000a7bffefa6cb799a9590b53f3433b1ae4b"
+)
+DS000030_STORAGE_REFERENCE = (
+    "storage-readiness-sha256:3d28205a55ed386c8b5f5ac1bbb123c8d5efc505e11ee55a612d52ce90fd6acd"
+)
+
 # External hash-manifest evidence a dataset must reference to claim a verified
 # hash strategy. The manifest itself is created outside Git at acquisition.
 HASH_MANIFEST_BASENAME = "checksums.sha256"
@@ -163,6 +182,7 @@ def required_records() -> list[DatasetAccessRecord]:
             size_verified=False,
             storage_verified=False,
             hash_strategy_verified=True,
+            independent_approval_verified=False,
             required_manual_action=(
                 "Register a NITRC account and join the 1000 Functional Connectomes "
                 "Project / INDI resource, then be logged in at download time."
@@ -193,34 +213,36 @@ def required_records() -> list[DatasetAccessRecord]:
             commercial_use_allowed=True,
             provider_reidentification_restricted=False,
             acquisition_scope_id="ds000030_pilot_5_subjects",
-            # The full-snapshot size (85,127,263,296 bytes, OpenNeuro GraphQL) is
-            # informational provider metadata, NOT authorization evidence for the
-            # five-subject pilot. Pilot size stays unverified until the selected
-            # file list has a provider-metadata-derived total for that scope.
-            expected_size_bytes=None,
-            size_scope_id=None,
+            # Pilot size is the exact sum of provider-reported file sizes for the
+            # five-subject metadata plan (scope ds000030_pilot_5_subjects). The
+            # full snapshot (85,127,263,296 bytes) is informational only and does
+            # not authorize this subset.
+            expected_size_bytes=DS000030_PILOT_EXPECTED_BYTES,
+            size_scope_id="ds000030_pilot_5_subjects",
+            size_evidence_reference=DS000030_PILOT_PLAN_REFERENCE,
             expected_size_source=(
-                "Provider full-snapshot metadata for tag 1.0.0 is 85,127,263,296 bytes "
-                "(OpenNeuro GraphQL), informational only. The whole snapshot is NOT "
-                f"acquired: the next unit is a bounded {DS000030_PILOT_SUBJECT_COUNT}-subject "
-                "pilot whose size is computed from per-file snapshot metadata for the selected "
-                "subjects before download; the planned controlled RQ5 subset is "
-                f"~{DS000030_PLANNED_RQ5_SUBJECT_COUNT} subjects, reached only after pilot gates "
-                "pass."
+                "Exact sum of OpenNeuro provider-reported file sizes for the "
+                f"{DS000030_PILOT_SUBJECT_COUNT}-subject pilot plan (scope "
+                "ds000030_pilot_5_subjects). The full-snapshot total of 85,127,263,296 "
+                "bytes is informational only and is not acquired; the planned controlled "
+                f"RQ5 subset is ~{DS000030_PLANNED_RQ5_SUBJECT_COUNT} subjects, reached only "
+                "after pilot gates pass."
             ),
             verification_date=VERIFICATION_DATE,
             citation_ids=["OpenNeuro ds000030"],
             target_root=f"{DATA_ROOT}/ds000030",
             hash_algorithm="sha256",
             hash_manifest_location=f"{DATA_ROOT}/ds000030/{HASH_MANIFEST_BASENAME}",
-            storage_available_bytes=None,
-            storage_required_bytes=None,
-            storage_margin_bytes=None,
-            storage_evidence_reference=None,
+            storage_available_bytes=DS000030_STORAGE_AVAILABLE_BYTES,
+            storage_required_bytes=DS000030_PILOT_EXPECTED_BYTES,
+            storage_margin_bytes=CONTROLLED_RESERVE_BYTES,
+            storage_evidence_reference=DS000030_STORAGE_REFERENCE,
+            storage_scope_id="ds000030_pilot_5_subjects",
             citation_verified=True,
-            size_verified=False,
-            storage_verified=False,
+            size_verified=True,
+            storage_verified=True,
             hash_strategy_verified=True,
+            independent_approval_verified=False,
             required_manual_action=None,
             acquisition_permitted=False,
         ),
@@ -257,6 +279,7 @@ def required_records() -> list[DatasetAccessRecord]:
             acquisition_scope_id="cobre_niak_lightweight_release_v1",
             expected_size_bytes=657308547,
             size_scope_id="cobre_niak_lightweight_release_v1",
+            size_evidence_reference="cobre-niak-figshare-article-sha256:4197885-v1",
             expected_size_source="figshare API article 4197885 (297 files, total bytes)",
             verification_date=VERIFICATION_DATE,
             citation_ids=["COBRE", "NIAK COBRE derivative release"],
@@ -271,6 +294,7 @@ def required_records() -> list[DatasetAccessRecord]:
             size_verified=True,
             storage_verified=False,
             hash_strategy_verified=True,
+            independent_approval_verified=False,
             required_manual_action=(
                 "Obtain written clarification from the derivative publisher on the "
                 "figshare CC BY 4.0 vs upstream COBRE CC BY-NC layered-license conflict."
@@ -278,6 +302,50 @@ def required_records() -> list[DatasetAccessRecord]:
             acquisition_permitted=False,
         ),
     ]
+
+
+_SELECTED_ID_RE = re.compile(r"\bsub-\d{5}\b")
+# A real, non-portable rendering of the external data root (an absolute /home or
+# /mnt path that reaches neuromultiverse-data). The portable "$HOME/..." form and
+# unrelated /mnt/c split-stack discussion are intentionally not matched.
+_EXTERNAL_ABS_PATH_RE = re.compile(r"(?:/home/|/mnt/)[^\s`]*neuromultiverse-data")
+
+
+def _valid_size_reference(dataset_id: str, reference: str) -> bool:
+    """An opaque, non-secret evidence reference: no path, no whitespace, no home."""
+    if "/" in reference or any(ch.isspace() for ch in reference):
+        return False
+    if _HOME_RE.search(reference) or _EXTERNAL_ABS_PATH_RE.search(reference):
+        return False
+    return ":" in reference
+
+
+def _tracked_text_files() -> list[Path]:
+    """Disclosure surfaces to scan for leaked identifiers/absolute paths.
+
+    Only documentation and data manifests are scanned: source and test files
+    legitimately contain path-guard regexes and rejection fixtures (e.g. a
+    ``/home/...`` string used to prove such a path is *refused*), which are not
+    leaks. A real leak would land in the governance docs or a manifest.
+    """
+    globs = ("docs/*.md", "data/**/*.tsv", "data/**/*.md")
+    found: list[Path] = []
+    for pattern in globs:
+        found.extend(REPO_ROOT.glob(pattern))
+    return [p for p in found if p.is_file()]
+
+
+def _check_no_selected_identifiers() -> list[str]:
+    """No pilot subject identifier or external absolute path may be committed."""
+    problems: list[str] = []
+    for path in _tracked_text_files():
+        text = path.read_text(encoding="utf-8", errors="replace")
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if _SELECTED_ID_RE.search(text):
+            problems.append(f"{rel}: a ds000030 subject identifier appears in a tracked file")
+        if _EXTERNAL_ABS_PATH_RE.search(text):
+            problems.append(f"{rel}: an external absolute path appears in a tracked file")
+    return problems
 
 
 def verified_citation_topics() -> set[str]:
@@ -407,12 +475,31 @@ def check(records: list[DatasetAccessRecord]) -> list[str]:
                 f"{rid}: provider_reidentification_restricted=true without a verified explicit "
                 "provider re-identification clause"
             )
-        # The full snapshot size must never be pilot evidence.
+        # Evidence references, when present, must use the approved opaque formats.
+        if record.size_evidence_reference and not _valid_size_reference(
+            rid, record.size_evidence_reference
+        ):
+            problems.append(f"{rid}: size_evidence_reference uses an unapproved format")
+        if record.storage_evidence_reference and not record.storage_evidence_reference.startswith(
+            "storage-readiness-sha256:"
+        ):
+            problems.append(f"{rid}: storage_evidence_reference uses an unapproved format")
+        # ds000030 pilot must be scope-bound to the five-subject plan, not the
+        # full snapshot. Evidence-based, replacing the old blanket rejection.
         if rid == "ds000030" and record.size_verified:
-            problems.append(
-                "ds000030: pilot size cannot be verified before a five-subject file-list total"
-            )
+            if record.acquisition_scope_id != "ds000030_pilot_5_subjects":
+                problems.append("ds000030: verified size must be scoped to the five-subject pilot")
+            if record.expected_size_bytes != DS000030_PILOT_EXPECTED_BYTES:
+                problems.append("ds000030: expected_size_bytes does not match the recorded plan")
+            if record.size_evidence_reference != DS000030_PILOT_PLAN_REFERENCE:
+                problems.append(
+                    "ds000030: size_evidence_reference does not match the approved plan"
+                )
+        # Independent approval must remain unverified in this preflight.
+        if record.independent_approval_verified:
+            problems.append(f"{rid}: independent_approval_verified must be false in this preflight")
 
+    problems.extend(_check_no_selected_identifiers())
     problems.extend(_check_citation_dois())
     problems.extend(_check_false_attribution())
     problems.extend(_check_manual_actions(records))
@@ -624,11 +711,15 @@ def main() -> int:
                         r.storage_evidence_reference,
                     )
                 ),
+                "size_evidence_reference": r.size_evidence_reference,
+                "storage_scope_id": r.storage_scope_id,
+                "storage_evidence_reference": r.storage_evidence_reference,
                 "prerequisites": {
                     "citation_verified": r.citation_verified,
                     "size_verified": r.size_verified,
                     "storage_verified": r.storage_verified,
                     "hash_strategy_verified": r.hash_strategy_verified,
+                    "independent_approval_verified": r.independent_approval_verified,
                 },
                 "required_manual_action_present": r.required_manual_action is not None,
                 "acquisition_permitted": r.acquisition_permitted,
@@ -637,6 +728,8 @@ def main() -> int:
         ],
         "pilot_subject_count": DS000030_PILOT_SUBJECT_COUNT,
         "planned_rq5_subject_count": DS000030_PLANNED_RQ5_SUBJECT_COUNT,
+        "ds000030_pilot_file_count": DS000030_PILOT_FILE_COUNT,
+        "ds000030_pilot_expected_bytes": DS000030_PILOT_EXPECTED_BYTES,
         "problem_count": len(problems),
         "problems": problems,
     }

@@ -35,6 +35,7 @@ from pydantic import (
 )
 
 __all__ = [
+    "APPROVED_DATA_ROOT_PREFIX",
     "SUBJECT_MANIFEST_COLUMNS",
     "USE_RESTRICTIONS",
     "AccessStatus",
@@ -66,6 +67,10 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SHA512_RE = re.compile(r"^[0-9a-f]{128}$")
 
 HashAlgorithm = Literal["sha256", "sha512"]
+
+#: The only approved portable external data root. A verified hash manifest and
+#: target root must live beneath it; never inside the Git repository.
+APPROVED_DATA_ROOT_PREFIX = "$HOME/neuromultiverse-data/"
 
 
 class AccessStatus(StrEnum):
@@ -180,13 +185,17 @@ class DatasetAccessRecord(BaseModel):
     # ``expected_size_source`` prose, never as verified subset evidence.
     expected_size_bytes: NonNegativeInt | None = None
     size_scope_id: str | None = None
+    # Opaque, non-secret reference to the external evidence backing the size (a
+    # digest of the pilot plan, never an absolute path). Present iff size_verified.
+    size_evidence_reference: str | None = None
     expected_size_source: str = Field(min_length=1)
     verification_date: date
     citation_ids: Annotated[list[str], Field(min_length=1)]
     target_root: str = Field(min_length=1)
     hash_algorithm: HashAlgorithm = "sha256"
-    # Portable, outside-Git path to the checksum manifest for this dataset. The
-    # extension must match the hash algorithm. The file is not created here.
+    # Portable, outside-Git path to the checksum manifest for this dataset. When
+    # verified it must live under target_root, which must be under the approved
+    # data root; the extension must match the hash algorithm. Not created here.
     hash_manifest_location: str | None = None
     # Numeric storage evidence. All present together (and satisfying the capacity
     # inequality) exactly when storage_verified is true; all None otherwise.
@@ -196,6 +205,9 @@ class DatasetAccessRecord(BaseModel):
     # Non-secret pointer to an external acquisition log / approval record. Never a
     # user path, username, token, account email, or credential.
     storage_evidence_reference: str | None = None
+    # Binds storage evidence to a scope: measured capacity for one scope must not
+    # authorize another. Present iff storage_verified.
+    storage_scope_id: str | None = None
     # Explicit acquisition-checklist prerequisites, each machine-enforced. They
     # are separate booleans rather than one "verified" flag so that a single
     # unmet item cannot be papered over. ``storage_verified`` is only true after
@@ -206,6 +218,10 @@ class DatasetAccessRecord(BaseModel):
     size_verified: bool
     storage_verified: bool
     hash_strategy_verified: bool
+    # A separate human approval gate. Acquisition can only be permitted after an
+    # independent reviewer has approved this governance record; a preflight that
+    # merely satisfies the technical prerequisites is never that approval.
+    independent_approval_verified: bool
     # Present (nonblank) exactly when access is gated; ``None`` when READY.
     required_manual_action: str | None = None
     acquisition_permitted: bool
@@ -236,7 +252,8 @@ class DatasetAccessRecord(BaseModel):
                 "a CONFLICT license cannot be READY; use SOURCE_AMBIGUOUS until reconciled"
             )
 
-        # Size evidence must belong to the acquisition scope, not a wider set.
+        # Size evidence must belong to the acquisition scope, not a wider set,
+        # and must cite an opaque external evidence reference.
         if self.size_verified:
             if self.expected_size_bytes is None:
                 raise ValueError("size_verified cannot be true while expected_size_bytes is None")
@@ -247,10 +264,19 @@ class DatasetAccessRecord(BaseModel):
                     "size_verified evidence is for a different scope "
                     f"({self.size_scope_id!r} != {self.acquisition_scope_id!r})"
                 )
-        elif self.size_scope_id is not None:
-            raise ValueError("size_scope_id must be None while size_verified is false")
+            if not (self.size_evidence_reference and self.size_evidence_reference.strip()):
+                raise ValueError("size_verified requires a nonblank size_evidence_reference")
+            _reject_home_paths(self.size_evidence_reference, "size_evidence_reference")
+        else:
+            if self.size_scope_id is not None:
+                raise ValueError("size_scope_id must be None while size_verified is false")
+            if self.size_evidence_reference is not None:
+                raise ValueError(
+                    "size_evidence_reference must be None while size_verified is false"
+                )
 
-        # Hash strategy must point at a portable, algorithm-matched manifest.
+        # Hash strategy must point at a portable, algorithm-matched manifest that
+        # lives under the target root, which itself is under the approved root.
         if self.hash_strategy_verified:
             location = self.hash_manifest_location
             if not (location and location.strip()):
@@ -261,21 +287,40 @@ class DatasetAccessRecord(BaseModel):
                 raise ValueError(
                     f"hash_manifest_location must end with {expected_ext} for {self.hash_algorithm}"
                 )
+            if not self.target_root.startswith(APPROVED_DATA_ROOT_PREFIX):
+                raise ValueError(f"target_root must be under {APPROVED_DATA_ROOT_PREFIX}")
+            if not location.startswith(self.target_root + "/"):
+                raise ValueError("hash_manifest_location must be under target_root")
+            if location == self.target_root:
+                raise ValueError("hash_manifest_location must not equal target_root")
 
-        # Storage evidence is all-or-nothing and must satisfy the capacity margin.
+        # Storage evidence is all-or-nothing, scope-bound, and margin-satisfying.
         available = self.storage_available_bytes
         required = self.storage_required_bytes
         margin = self.storage_margin_bytes
         ref = self.storage_evidence_reference
-        storage_fields = (available, required, margin, ref)
+        scope = self.storage_scope_id
+        storage_fields = (available, required, margin, ref, scope)
         if self.storage_verified:
-            if available is None or required is None or margin is None or ref is None:
+            if (
+                available is None
+                or required is None
+                or margin is None
+                or ref is None
+                or scope is None
+            ):
                 raise ValueError("storage_verified requires all storage-evidence fields")
             if not ref.strip():
                 raise ValueError("storage_verified requires a nonblank storage_evidence_reference")
             _reject_home_paths(ref, "storage_evidence_reference")
             if "@" in ref:
                 raise ValueError("storage_evidence_reference must not contain an email address")
+            if scope != self.acquisition_scope_id:
+                raise ValueError("storage_scope_id must equal acquisition_scope_id")
+            if not self.size_verified or self.size_scope_id != self.acquisition_scope_id:
+                raise ValueError("storage_verified requires scope-matched verified size")
+            if self.expected_size_bytes is None or required < self.expected_size_bytes:
+                raise ValueError("storage_required_bytes must be >= expected_size_bytes")
             if margin <= 0:
                 raise ValueError("storage_margin_bytes must be greater than zero")
             if available < required + margin:
@@ -315,6 +360,7 @@ class DatasetAccessRecord(BaseModel):
                     ("size_verified", self.size_verified),
                     ("storage_verified", self.storage_verified),
                     ("hash_strategy_verified", self.hash_strategy_verified),
+                    ("independent_approval_verified", self.independent_approval_verified),
                 )
                 if not ok
             ]
