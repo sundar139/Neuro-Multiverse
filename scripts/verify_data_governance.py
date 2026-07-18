@@ -368,14 +368,67 @@ def _check_executor_hardening() -> list[str]:
         problems.append("executor lacks integrity-aware (SHA-256) completion")
     if "return target.exists() and target.stat().st_size == expected_size" in executor:
         problems.append("executor still uses size-only completion")
+    if "size_only_unverified" not in executor:
+        problems.append("executor does not reject a size-only present file")
     # The checksum manifest lives under the external target root, not in Git.
     if "checksums.sha256" not in executor:
         problems.append("executor does not reference an external checksum manifest")
+
+    # The live metadata resolver must be implemented and fail-closed.
+    if "NotImplementedError" in executor:
+        problems.append("executor still contains an unimplemented (NotImplementedError) branch")
+
+    # Approval must bind the exact HEAD and the whole executor bundle, not an
+    # ancestor and not only the top-level script.
+    if "is-ancestor" in executor or "commit_is_approved_ancestor" in executor:
+        problems.append("executor still accepts an ancestor-based approval")
+    if "exactly the current HEAD" not in executor:
+        problems.append("executor does not require the approved commit to equal HEAD")
+    if "executor_bundle" not in executor or "_BUNDLE_MEMBERS" not in executor:
+        problems.append("executor is not bound to the full executor bundle digest")
+    if "src/neuromultiverse/ds000030_pilot.py" not in executor:
+        problems.append("executor bundle does not include the security-critical pilot module")
+
+    # Target root must be tied to the external storage-readiness record.
+    if "--storage-record" not in executor or "storage_problems" not in executor:
+        problems.append("executor does not require and validate a storage-readiness record")
+    if "PilotStorageRecord" not in executor:
+        problems.append("executor does not model the storage-readiness record")
+    if "recorded external root's ds000030/raw directory" not in executor:
+        problems.append("executor does not bind the storage record target to the runtime target")
+
+    # Object origins must be precise host+path policies, not a bare shared host.
+    if "class ObjectOrigin" not in executor or "path_prefix" not in executor:
+        problems.append("executor does not encode precise host+path object origins")
+    if re.search(r"_ALLOWED_OBJECT_HOSTS\s*=\s*frozenset", executor):
+        problems.append("executor still allows any object under a shared S3 host")
+
+    # Provider checksums must be enforced, not merely modeled.
+    if "provider checksum mismatch" not in executor:
+        problems.append("executor models provider checksums but does not enforce them")
+
+    # Manifest parsing must be strict and single-run locked.
+    if "ManifestError" not in executor:
+        problems.append("executor manifest parsing is not fail-closed")
+    if "ExecutionLock" not in executor or "O_EXCL" not in executor:
+        problems.append("executor lacks a single-run execution lock")
+
+    # File modes must fail closed (None is never success).
+    if "mode_is_600" not in executor or 'hasattr(os, "getuid")' not in executor:
+        problems.append("executor does not fail closed when file modes are unverifiable")
+    if "Ubuntu-24.04" not in executor:
+        problems.append("executor does not restrict execution to the Ubuntu-24.04 WSL runtime")
 
     if 'extra="forbid"' not in model:
         problems.append("pilot schema is not strict (extra must be forbidden)")
     if re.search(r"(?i)\b(download_url|signed_url)\b|\burl\b\s*[:=]\s*str", model):
         problems.append("pilot plan schema appears to accept a download-URL field")
+    if "PilotStorageRecord" not in model:
+        problems.append("pilot module does not define the storage-readiness model")
+    if "executor_bundle_sha256" not in model or "storage_record_sha256" not in model:
+        problems.append("approval model lacks the code/storage binding fields")
+    if "_check_sidecar_correspondence" not in model or "SUPPORTED_CHECKSUM_ALGORITHMS" not in model:
+        problems.append("pilot schema lacks sidecar/checksum enforcement")
 
     templates = list(APPROVAL_DIR.glob("*.template.json"))
     if not templates:
@@ -384,6 +437,9 @@ def _check_executor_hardening() -> list[str]:
         data = json.loads(tpl.read_text(encoding="utf-8"))
         if data.get("decision") != "not_approved":
             problems.append(f"{tpl.name}: approval template must be decision=not_approved")
+        for key in ("executor_bundle_sha256", "storage_record_sha256"):
+            if key not in data:
+                problems.append(f"{tpl.name}: template missing execution-binding field {key}")
     for record in APPROVAL_DIR.glob("*.json"):
         if record.name.endswith(".template.json"):
             continue

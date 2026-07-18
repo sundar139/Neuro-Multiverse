@@ -10,6 +10,8 @@
   "expected_transfer_bytes": 0,
   "size_evidence_reference": "PLACEHOLDER_ds000030-pilot-plan-sha256",
   "storage_evidence_reference": "PLACEHOLDER_storage-readiness-sha256",
+  "storage_record_sha256": "PLACEHOLDER_storage_record_canonical_sha256",
+  "executor_bundle_sha256": "PLACEHOLDER_executor_bundle_canonical_sha256",
   "approved_code_commit": "PLACEHOLDER_reviewed_executor_commit",
   "approval_timestamp_utc": "PLACEHOLDER_utc_iso8601",
   "approval_id": "PLACEHOLDER_unique_id",
