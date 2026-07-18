@@ -419,6 +419,32 @@ def _check_executor_hardening() -> list[str]:
     if "Ubuntu-24.04" not in executor:
         problems.append("executor does not restrict execution to the Ubuntu-24.04 WSL runtime")
 
+    # Approval evidence must use the shared, zero-body execution preflight.
+    if "--validate-execution" not in executor:
+        problems.append("executor lacks the mandatory no-body execution preflight")
+    if "validate_execution_preconditions" not in executor:
+        problems.append("execution and validation do not share one precondition implementation")
+    if "validation and execution require approval and storage records" not in executor:
+        problems.append("execution preflight does not require approval and storage records")
+    if "use --validate-execution with approval or storage evidence" not in executor:
+        problems.append("ordinary dry-run can accept approval evidence incompletely")
+    if "metadata_objects_resolved" not in executor or "network_body_requests" not in executor:
+        problems.append("execution preflight does not prove metadata-only object resolution")
+
+    # GraphQL redirects stay at the exact metadata endpoint.
+    if "OriginRedirectHandler(_METADATA_ORIGINS)" not in executor:
+        problems.append("metadata redirects are not restricted to the metadata origin")
+    if "urllib.request.urlopen(" in executor:
+        problems.append("metadata requests still use unrestricted default redirects")
+
+    # External evidence files must be mode 600 from the instant of creation.
+    secure_create = "os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600"
+    secure_append = "os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600"
+    if secure_create not in executor or secure_append not in executor:
+        problems.append("event or manifest files are not securely created at mode 600")
+    if 'tmp.open("w"' in executor or 'path.open("a"' in executor:
+        problems.append("external evidence uses a create-then-chmod file-creation window")
+
     if 'extra="forbid"' not in model:
         problems.append("pilot schema is not strict (extra must be forbidden)")
     if re.search(r"(?i)\b(download_url|signed_url)\b|\burl\b\s*[:=]\s*str", model):

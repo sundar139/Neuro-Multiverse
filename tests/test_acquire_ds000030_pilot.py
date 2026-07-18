@@ -510,6 +510,27 @@ def test_redirect_to_untrusted_host_rejected() -> None:
     assert handler.validate_redirect("https://s3.amazonaws.com/openneuro.org/x")
 
 
+def test_metadata_redirect_stays_on_exact_endpoint() -> None:
+    handler = tool.OriginRedirectHandler(tool._METADATA_ORIGINS)
+    assert handler.validate_redirect("https://openneuro.org/crn/graphql")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://openneuro.org/crn/datasets/ds000030/x",
+        "https://openneuro.org/another/path",
+        "https://openneuro.org/crn/graphql/other",
+        "https://s3.amazonaws.com/openneuro.org/x",
+        "https://evil.example.com/crn/graphql",
+    ],
+)
+def test_metadata_redirect_cannot_leave_exact_endpoint(url: str) -> None:
+    handler = tool.OriginRedirectHandler(tool._METADATA_ORIGINS)
+    with pytest.raises(ValueError):
+        handler.validate_redirect(url)
+
+
 # --- Live metadata resolver (synthetic injection) ---------------------------
 def _synthetic_tree(monkeypatch: pytest.MonkeyPatch) -> None:
     """A tiny two-level tree with one resolvable object under sub-SYNTHA/anat."""
@@ -563,13 +584,16 @@ def test_root_graphql_query_has_no_empty_parentheses(monkeypatch: pytest.MonkeyP
         def __exit__(self, *_args: Any) -> None:
             self.close()
 
-    def fake_urlopen(request: Any, timeout: int) -> Response:
-        captured["query"] = json.loads(request.data)["query"]
-        return Response(b'{"data":{"snapshot":{"files":[]}}}')
+    class Opener:
+        def open(self, request: Any, timeout: int) -> Response:
+            captured["query"] = json.loads(request.data)["query"]
+            return Response(b'{"data":{"snapshot":{"files":[]}}}')
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_handlers: Opener())
+    tool._metadata_request_count = 0
     assert tool._graphql_files(None) == []
     assert "files()" not in captured["query"]
+    assert tool._metadata_request_count == 1
 
 
 def test_resolver_no_longer_raises_not_implemented() -> None:
@@ -863,6 +887,182 @@ def test_storage_mount_must_still_match(tmp_path: Path, monkeypatch: pytest.Monk
     assert any("mount" in p for p in tool.storage_problems(data, model, target, 100))
 
 
+def _execution_preflight_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[list[str], Any]:
+    plan = _valid_plan_dict()
+    digest = _sync_constants(monkeypatch, plan)
+    storage = _storage_record(tmp_path)
+    _storage_ready(monkeypatch, storage)
+    storage_digest = tool.canonical_json_digest(storage)
+    approval = _approval(
+        digest,
+        plan,
+        storage_evidence_reference=f"storage-readiness-sha256:{storage_digest}",
+        storage_record_sha256=storage_digest,
+    )
+    plan_path = tmp_path / "plan.json"
+    approval_path = tmp_path / "approval.json"
+    storage_path = tmp_path / "storage.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    approval_path.write_text(json.dumps(approval), encoding="utf-8")
+    storage_path.write_text(json.dumps(storage), encoding="utf-8")
+    target = _raw_target(tmp_path)
+    monkeypatch.setattr(tool, "mode_is_600", lambda _path: True)
+    monkeypatch.setattr(tool, "runtime_problems", lambda: [])
+    monkeypatch.setattr(tool, "working_tree_clean", lambda: True)
+    monkeypatch.setattr(tool, "working_files_match_commit", lambda _commit: True)
+
+    def fetcher(oid: str, path: str) -> list[dict[str, Any]]:
+        entry = next(item for item in plan["files"] if item["provider_object_id"] == oid)
+        return [
+            {
+                "provider_object_id": oid,
+                "provider_path": path,
+                "provider_size_bytes": entry["provider_size_bytes"],
+                "url": "https://s3.amazonaws.com/openneuro.org/synthetic",
+            }
+        ]
+
+    args = [
+        "--plan",
+        str(plan_path),
+        "--target-root",
+        str(target),
+        "--approval-record",
+        str(approval_path),
+        "--storage-record",
+        str(storage_path),
+        "--validate-execution",
+    ]
+    return args, fetcher
+
+
+def test_validate_execution_requires_both_records(tmp_path: Path) -> None:
+    plan = _valid_plan_dict()
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps(plan), encoding="utf-8")
+    assert (
+        tool.main(["--plan", str(path), "--target-root", str(tmp_path), "--validate-execution"])
+        == 1
+    )
+
+
+def test_valid_execution_preflight_resolves_all_objects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args, fetcher = _execution_preflight_fixture(tmp_path, monkeypatch)
+    assert tool.main(args, fetcher=fetcher) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["metadata_objects_resolved"] == 22
+    assert summary["network_body_requests"] == 0
+    assert summary["preconditions_ok"] is True
+
+
+def test_execution_preflight_missing_metadata_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args, _fetcher = _execution_preflight_fixture(tmp_path, monkeypatch)
+    assert tool.main(args, fetcher=lambda _oid, _path: []) == 1
+
+
+def test_execution_preflight_multiple_metadata_matches_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args, fetcher = _execution_preflight_fixture(tmp_path, monkeypatch)
+    assert tool.main(args, fetcher=lambda oid, path: fetcher(oid, path) * 2) == 1
+
+
+@pytest.mark.parametrize("field", ["approved_code_commit", "executor_bundle_sha256"])
+def test_execution_preflight_rejects_code_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    args, fetcher = _execution_preflight_fixture(tmp_path, monkeypatch)
+    approval_path = Path(args[args.index("--approval-record") + 1])
+    approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    approval[field] = "f" * (40 if field == "approved_code_commit" else 64)
+    approval_path.write_text(json.dumps(approval), encoding="utf-8")
+    assert tool.main(args, fetcher=fetcher) == 1
+
+
+def test_execution_preflight_rejects_unsupported_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args, fetcher = _execution_preflight_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(tool, "runtime_problems", lambda: ["unsupported runtime"])
+    assert tool.main(args, fetcher=fetcher) == 1
+
+
+def test_execution_preflight_rejects_dirty_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args, fetcher = _execution_preflight_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(tool, "working_tree_clean", lambda: False)
+    assert tool.main(args, fetcher=fetcher) == 1
+
+
+def test_execution_preflight_rejects_unverifiable_modes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args, fetcher = _execution_preflight_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(tool, "mode_is_600", lambda _path: None)
+    assert tool.main(args, fetcher=fetcher) == 1
+
+
+def test_execution_preflight_rejects_malformed_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args, fetcher = _execution_preflight_fixture(tmp_path, monkeypatch)
+    manifest = tmp_path / "ds000030" / "checksums.sha256"
+    manifest.write_text("bad\n", encoding="utf-8")
+    assert tool.main(args, fetcher=fetcher) == 1
+
+
+def test_execution_preflight_rejects_storage_target_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args, fetcher = _execution_preflight_fixture(tmp_path, monkeypatch)
+    wrong = tmp_path / "wrong-target"
+    wrong.mkdir()
+    args[args.index("--target-root") + 1] = str(wrong)
+    assert tool.main(args, fetcher=fetcher) == 1
+
+
+def test_execution_preflight_rejects_mount_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args, fetcher = _execution_preflight_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(tool, "_mount_info", lambda _mount: ("wrong", "wrong"))
+    assert tool.main(args, fetcher=fetcher) == 1
+
+
+def test_execution_preflight_existing_lock_fails_without_modifying_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args, fetcher = _execution_preflight_fixture(tmp_path, monkeypatch)
+    lock = tmp_path / "acquisition-log" / "ds000030-pilot.lock"
+    lock.parent.mkdir()
+    lock.write_text("unchanged", encoding="utf-8")
+    assert tool.main(args, fetcher=fetcher) == 1
+    assert lock.read_text(encoding="utf-8") == "unchanged"
+
+
+def test_ordinary_dry_run_with_evidence_cannot_false_green(tmp_path: Path) -> None:
+    assert (
+        tool.main(
+            [
+                "--plan",
+                str(tmp_path / "plan"),
+                "--target-root",
+                str(tmp_path),
+                "--approval-record",
+                str(tmp_path / "approval"),
+            ]
+        )
+        == 1
+    )
+
+
 # --- Runtime / mode gates ---------------------------------------------------
 def test_execute_without_records_blocks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     plan = _valid_plan_dict()
@@ -918,6 +1118,7 @@ def test_dry_run_returns_zero_when_valid(tmp_path: Path, monkeypatch: pytest.Mon
     _sync_constants(monkeypatch, plan)
     plan_path = tmp_path / "plan.json"
     plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    plan_path.chmod(0o600)
     rc = tool.main(["--plan", str(plan_path), "--target-root", str(tmp_path), "--dry-run"])
     assert rc == 0
 
@@ -958,6 +1159,25 @@ def test_manifest_roundtrip_canonical_sorted(tmp_path: Path) -> None:
         "sub-SYNTHA/anat/x.nii.gz": "a" * 64,
         "sub-SYNTHB/func/y.nii.gz": "b" * 64,
     }
+
+
+@pytest.mark.skipif(not _POSIX, reason="POSIX secure creation modes")
+def test_manifest_created_mode_600_and_parent_fsynced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+    real_fsync = os.fsync
+
+    def counted(fd: int) -> None:
+        nonlocal calls
+        calls += 1
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", counted)
+    manifest = tmp_path / "checksums.sha256"
+    tool.add_manifest_entry(manifest, "x/y", "a" * 64)
+    assert manifest.stat().st_mode & 0o777 == 0o600
+    assert calls >= 2
 
 
 @pytest.mark.parametrize(
@@ -1219,6 +1439,12 @@ def test_event_written_with_common_context(tmp_path: Path, monkeypatch: pytest.M
     ):
         assert key in text
     assert "http" not in text.lower()
+
+
+@pytest.mark.skipif(not _POSIX, reason="POSIX secure creation modes")
+def test_event_log_created_mode_600(tmp_path: Path) -> None:
+    tool.append_event(tmp_path, {"event": "run_started"})
+    assert (tmp_path / "acquisition-events.jsonl").stat().st_mode & 0o777 == 0o600
 
 
 # --- Single-run lock --------------------------------------------------------

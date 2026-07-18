@@ -85,6 +85,7 @@ class ObjectOrigin:
 
     host: str
     path_prefix: str  # the URL path must start with this
+    exact_path: bool = False
 
 
 # Minimum precise allowlist for ds000030 snapshot 1.0.0, from authoritative
@@ -95,8 +96,9 @@ _OBJECT_ORIGINS = (
     ObjectOrigin("openneuro.org", "/crn/datasets/"),
     ObjectOrigin("s3.amazonaws.com", "/openneuro.org/"),
 )
-_METADATA_ORIGINS = (ObjectOrigin("openneuro.org", "/crn/graphql"),)
+_METADATA_ORIGINS = (ObjectOrigin("openneuro.org", "/crn/graphql", exact_path=True),)
 _METADATA_ENDPOINT = "https://openneuro.org/crn/graphql"
+_metadata_request_count = 0
 
 # Substrings that must never appear in an event key or in any event string value.
 _FORBIDDEN_EVENT_TOKENS = (
@@ -264,16 +266,23 @@ def validate_url(url: str, origins: tuple[ObjectOrigin, ...] = _OBJECT_ORIGINS) 
     if "\\" in decoded_path or any(segment in (".", "..") for segment in decoded_path.split("/")):
         raise ValueError("url path contains an unsafe segment")
     for origin in origins:
-        if host == origin.host and path.startswith(origin.path_prefix):
+        path_matches = (
+            path == origin.path_prefix if origin.exact_path else path.startswith(origin.path_prefix)
+        )
+        if host == origin.host and path_matches:
             return
     raise ValueError("url host/path is not on the allowlist")
 
 
-class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Validate every redirect target against the object allowlist before use."""
+class OriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Validate every redirect target against one exact origin policy."""
+
+    def __init__(self, origins: tuple[ObjectOrigin, ...]) -> None:
+        super().__init__()
+        self.origins = origins
 
     def validate_redirect(self, location: str) -> str:
-        validate_url(location, _OBJECT_ORIGINS)
+        validate_url(location, self.origins)
         return location
 
     def redirect_request(
@@ -287,6 +296,13 @@ class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
     ) -> urllib.request.Request | None:
         self.validate_redirect(newurl)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class SafeRedirectHandler(OriginRedirectHandler):
+    """Object-body redirects restricted to the approved object origins."""
+
+    def __init__(self) -> None:
+        super().__init__(_OBJECT_ORIGINS)
 
 
 def resolve_download_url(
@@ -375,13 +391,16 @@ def _graphql_files(tree: str | None) -> list[dict[str, Any]]:
         f"{field}{{ id filename size directory urls }} }} }}"
     )
     body = json.dumps({"query": query}).encode()
+    global _metadata_request_count
     last_exc: Exception | None = None
+    opener = urllib.request.build_opener(OriginRedirectHandler(_METADATA_ORIGINS))
     for _attempt in range(3):
         try:
             req = urllib.request.Request(  # noqa: S310 - validated https metadata endpoint
                 _METADATA_ENDPOINT, data=body, headers={"Content-Type": "application/json"}
             )
-            with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310
+            _metadata_request_count += 1
+            with opener.open(req, timeout=60) as resp:
                 payload = json.load(resp)
             if not isinstance(payload, dict) or payload.get("errors"):
                 raise ValueError("metadata response contains errors")
@@ -478,16 +497,25 @@ def write_manifest(manifest_path: Path, entries: dict[str, str]) -> None:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [f"{entries[rel]}  {rel}\n" for rel in sorted(entries)]
     tmp = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as fh:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write("".join(lines))
         fh.flush()
-        if hasattr(os, "fsync"):
-            os.fsync(fh.fileno())
-    if hasattr(os, "chmod"):
-        tmp.chmod(0o600)
+        os.fsync(fh.fileno())
     tmp.replace(manifest_path)
-    if hasattr(os, "chmod"):
-        manifest_path.chmod(0o600)
+    _fsync_directory(manifest_path.parent)
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist a directory update where the platform supports directory fsync."""
+    try:
+        dir_fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def add_manifest_entry(
@@ -550,10 +578,14 @@ def append_event(log_dir: Path, event: dict[str, Any]) -> None:
     _reject_forbidden(event)
     log_dir.mkdir(parents=True, exist_ok=True)
     path = log_dir / "acquisition-events.jsonl"
-    with path.open("a", encoding="utf-8") as fh:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    if hasattr(os, "getuid") and (os.fstat(fd).st_mode & 0o777) != 0o600:
+        os.close(fd)
+        raise PermissionError("event log mode is not 600")
+    with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(json.dumps({"timestamp_utc": _utc(), **event}) + "\n")
-    if hasattr(os, "chmod"):
-        path.chmod(0o600)
+        fh.flush()
+        os.fsync(fh.fileno())
 
 
 def _event_context(
@@ -853,6 +885,123 @@ def _aggregate_summary(
     }
 
 
+@dataclass(frozen=True)
+class ExecutionPreflightResult:
+    """Aggregate, identifier-free result shared by validation and execution."""
+
+    problems: tuple[str, ...]
+    metadata_objects_resolved: int
+    network_metadata_requests: int
+    storage_digest_matched: bool
+    exact_head_matched: bool
+    modes_verified: bool
+
+
+def validate_execution_preconditions(
+    plan: dict[str, Any],
+    plan_model: PilotAcquisitionPlan,
+    target_root: Path,
+    approval: PilotApprovalRecord,
+    storage: tuple[dict[str, Any], PilotStorageRecord],
+    plan_path: Path,
+    approval_path: Path,
+    storage_path: Path,
+    fetcher: MetadataFetcher,
+) -> ExecutionPreflightResult:
+    """Run every execution gate and resolve all objects without opening a body."""
+    global _metadata_request_count
+    try:
+        free_bytes = shutil.disk_usage(target_root).free
+    except OSError:
+        free_bytes = 0
+    problems = check_preconditions(
+        plan,
+        plan_model,
+        target_root,
+        free_bytes,
+        approval,
+        storage,
+        for_execution=True,
+    )
+    storage_root = Path(storage[1].resolved_external_data_root).resolve()
+    log_dir = storage_root / _LOG_RELATIVE_ROOT
+    manifest_path = storage_root / _MANIFEST_RELATIVE_PATH
+    lock_path = log_dir / "ds000030-pilot.lock"
+    mode_targets = [plan_path, approval_path, storage_path]
+    for path in (manifest_path, log_dir / "acquisition-events.jsonl", lock_path):
+        if path.exists():
+            mode_targets.append(path)
+    modes_verified = all(mode_is_600(path) is True for path in mode_targets)
+    if not modes_verified:
+        problems.append("an execution-critical file lacks verifiable mode 600")
+
+    allowed = frozenset(entry.local_relative_target for entry in plan_model.files)
+    try:
+        read_manifest(manifest_path, allowed)
+    except (OSError, UnicodeError, ManifestError):
+        problems.append("existing checksum manifest is invalid")
+    if lock_path.exists():
+        problems.append("execution lock is not available")
+
+    resolved = 0
+    _metadata_request_count = 0
+    if not problems:
+        for entry in plan_model.files:
+            try:
+                resolve_download_url(
+                    entry.provider_object_id,
+                    entry.provider_path,
+                    entry.provider_size_bytes,
+                    fetcher,
+                )
+            except ValueError:
+                problems.append("a planned metadata object did not resolve exactly once")
+                break
+            resolved += 1
+    if resolved != plan_model.expected_file_count and not problems:
+        problems.append("metadata object count does not match the plan")
+
+    head = head_commit()
+    return ExecutionPreflightResult(
+        problems=tuple(problems),
+        metadata_objects_resolved=resolved,
+        network_metadata_requests=_metadata_request_count,
+        storage_digest_matched=(
+            canonical_json_digest(storage[0])
+            == approval.storage_record_sha256
+            == DS000030_STORAGE_REFERENCE.rsplit(":", 1)[-1]
+        ),
+        exact_head_matched=bool(head and head == approval.approved_code_commit),
+        modes_verified=modes_verified,
+    )
+
+
+def _execution_preflight_summary(
+    plan_model: PilotAcquisitionPlan,
+    approval: PilotApprovalRecord,
+    result: ExecutionPreflightResult,
+) -> dict[str, Any]:
+    return {
+        "mode": "validate-execution",
+        "scope": plan_model.acquisition_scope_id,
+        "snapshot": plan_model.snapshot,
+        "plan_digest": DS000030_PLAN_CANONICAL_SHA256,
+        "executor_bundle_digest": approval.executor_bundle_sha256,
+        "planned_file_count": plan_model.expected_file_count,
+        "planned_transfer_bytes": plan_model.expected_transfer_bytes,
+        "storage_record_digest_matched": result.storage_digest_matched,
+        "exact_head_matched": result.exact_head_matched,
+        "runtime_supported": not runtime_problems(),
+        "modes_verified": result.modes_verified,
+        "metadata_objects_resolved": result.metadata_objects_resolved,
+        "network_metadata_requests": result.network_metadata_requests,
+        "network_body_requests": 0,
+        "preconditions_ok": not result.problems,
+        "problem_count": len(result.problems),
+        "problems": list(result.problems),
+    }
+
+
 # --- Single-run execution lock ----------------------------------------------
 class LockHeldError(RuntimeError):
     """Another live process holds the execution lock."""
@@ -1089,10 +1238,14 @@ def main(argv: list[str] | None = None, fetcher: MetadataFetcher | None = None) 
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--validate-execution", action="store_true")
     mode.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
 
-    for_execution = args.execute and not args.dry_run
+    ordinary_dry_run = not args.execute and not args.validate_execution
+    if ordinary_dry_run and (args.approval_record or args.storage_record):
+        print(json.dumps({"error": "use --validate-execution with approval or storage evidence"}))
+        return 1
     target_root = Path(args.target_root)
 
     try:
@@ -1130,57 +1283,54 @@ def main(argv: list[str] | None = None, fetcher: MetadataFetcher | None = None) 
             print(json.dumps({"error": "storage record must have mode 600"}))
             return 1
 
-    try:
-        free_bytes = shutil.disk_usage(target_root).free
-    except OSError:
-        free_bytes = 0
-
-    problems = check_preconditions(
-        plan, plan_model, target_root, free_bytes, approval, storage, for_execution=for_execution
-    )
-
-    if not for_execution:
+    if ordinary_dry_run:
+        try:
+            free_bytes = shutil.disk_usage(target_root).free
+        except OSError:
+            free_bytes = 0
+        problems = check_preconditions(
+            plan, plan_model, target_root, free_bytes, None, None, for_execution=False
+        )
         print(
             json.dumps(_aggregate_summary("dry-run", plan_model, target_root, problems), indent=2)
         )
         return 1 if problems else 0
 
-    if problems:
+    if approval is None or storage is None:
         print(
-            json.dumps({"error": "preconditions failed", "problem_count": len(problems)}, indent=2)
+            json.dumps({"error": "validation and execution require approval and storage records"})
         )
         return 1
-
-    # Every execution-critical mode must be verifiably 600 (None is not success).
-    if approval is None or storage is None:  # guarded by preconditions above
-        print(json.dumps({"error": "execution requires approval and storage records"}))
+    active_fetcher = fetcher or _default_metadata_fetcher
+    result = validate_execution_preconditions(
+        plan,
+        plan_model,
+        target_root,
+        approval,
+        storage,
+        Path(args.plan),
+        Path(args.approval_record),
+        Path(args.storage_record),
+        active_fetcher,
+    )
+    if args.validate_execution:
+        print(json.dumps(_execution_preflight_summary(plan_model, approval, result), indent=2))
+        return 1 if result.problems else 0
+    if result.problems:
+        print(json.dumps({"error": "preconditions failed", "problem_count": len(result.problems)}))
         return 1
-    storage_root = Path(storage[1].resolved_external_data_root).resolve()
-    log_dir = storage_root / _LOG_RELATIVE_ROOT
-    manifest_path = storage_root / _MANIFEST_RELATIVE_PATH
-    lock_path = log_dir / "ds000030-pilot.lock"
-    mode_targets = [Path(args.plan), Path(args.approval_record), Path(args.storage_record)]
-    if manifest_path.exists():
-        mode_targets.append(manifest_path)
-    event_path = log_dir / "acquisition-events.jsonl"
-    if event_path.exists():
-        mode_targets.append(event_path)
-    if lock_path.exists():
-        mode_targets.append(lock_path)
-    for path in mode_targets:
-        if mode_is_600(path) is not True:
-            print(json.dumps({"error": "an execution-critical file lacks verifiable mode 600"}))
-            return 1
 
     try:
+        storage_root = Path(storage[1].resolved_external_data_root).resolve()
+        log_dir = storage_root / _LOG_RELATIVE_ROOT
         return _run_execution(
             plan_model,
             approval,
             target_root,
-            fetcher or _default_metadata_fetcher,
+            active_fetcher,
             log_dir=log_dir,
-            manifest_path=manifest_path,
-            lock_path=lock_path,
+            manifest_path=storage_root / _MANIFEST_RELATIVE_PATH,
+            lock_path=log_dir / "ds000030-pilot.lock",
         )
     except Exception as exc:
         print(json.dumps({"error": f"execution failed: {type(exc).__name__}"}))
