@@ -558,6 +558,21 @@ def _check_raw_validation_tool() -> list[str]:
         "_docker_dataset_policy_args",
         'details.get("Os") != "linux"',
         "ERROR_CATEGORIES",
+        "36fe758b39961505c5edc1c9675f1af18166103454fcd21db5255d381ce540d8",
+        'REVIEWED_DOCKER_CLI_VERSION = "29.5.3"',
+        'REVIEWED_DOCKER_ENGINE_VERSION = "29.5.3"',
+        'REVIEWED_DOCKER_API_VERSION = "1.54"',
+        "_verify_docker_backend",
+        "identity.uid != 0",
+        "mode & 0o002",
+        "_effective_write",
+        "_replacement_writable",
+        "stat.S_ISLNK",
+        "_docker_group_is_trusted",
+        "_group_membership_trusted",
+        "_run_trusted_docker",
+        "before != after",
+        "REVIEWED_DOCKER_FILESYSTEM",
     )
     for marker in required_markers:
         if marker not in source:
@@ -565,12 +580,21 @@ def _check_raw_validation_tool() -> list[str]:
     for forbidden_mode in ("--repair", "--fix", "--normalize"):
         if forbidden_mode in source:
             problems.append(f"raw validation tool exposes forbidden mode {forbidden_mode}")
-    if ".chmod(" in source or "os.chmod(" in source:
-        problems.append("raw validation tool contains a forbidden chmod path")
+    if any(marker in source for marker in (".chmod(", "os.chmod(", ".chown(", "os.chown(")):
+        problems.append("raw validation tool contains a forbidden permission-change path")
     if '"blocking_issues": [str(exc)]' in source or '"problem": str(exc)' in source:
         problems.append("raw validation tool exposes raw exception text")
     if any(path.name == ".bidsignore" for path in REPO_ROOT.rglob(".bidsignore")):
         problems.append("repository contains a forbidden .bidsignore")
+    for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
+        direct_captured = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_run_captured"
+            for node in ast.walk(function)
+        )
+        if direct_captured and function.name != "_run_trusted_docker":
+            problems.append("a production Docker command bypasses the trusted wrapper")
     executor = EXECUTOR.read_text(encoding="utf-8")
     for marker in (
         "os.O_WRONLY | os.O_CREAT | os.O_EXCL",

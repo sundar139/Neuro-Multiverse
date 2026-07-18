@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import gzip
 import hashlib
 import json
@@ -42,7 +43,18 @@ VALIDATOR_IMAGE = (
 VALIDATOR_VERSION = "3.0.0"
 VALIDATOR_SCHEMA = "1.2.4"
 VALIDATOR_ARCHITECTURE = "amd64"
-DOCKER_COMMAND_POLICY_VERSION = "1"
+DOCKER_COMMAND_POLICY_VERSION = "2"
+REVIEWED_DOCKER_COMMAND = Path("/usr/bin/docker")
+REVIEWED_DOCKER_CANONICAL = Path("/mnt/wsl/docker-desktop/cli-tools/usr/bin/docker")
+REVIEWED_DOCKER_CLI_SHA256 = "36fe758b39961505c5edc1c9675f1af18166103454fcd21db5255d381ce540d8"
+REVIEWED_DOCKER_CLI_VERSION = "29.5.3"
+REVIEWED_DOCKER_ENGINE_VERSION = "29.5.3"
+REVIEWED_DOCKER_API_VERSION = "1.54"
+REVIEWED_DOCKER_CONTEXT = "default"
+REVIEWED_DOCKER_PROVENANCE = "trusted_docker_desktop_wsl_cli"
+REVIEWED_DOCKER_GROUP = "root"
+REVIEWED_DOCKER_MOUNT = Path("/mnt/wsl/docker-desktop/cli-tools")
+REVIEWED_DOCKER_FILESYSTEM = "iso9660"
 ERROR_CATEGORIES = frozenset(
     {
         "runtime_unsupported",
@@ -92,6 +104,30 @@ BOLD_RE = re.compile(r"^(sub-[A-Za-z0-9]+)_task-rest_bold\.(nii\.gz|json)$")
 
 class ValidationError(RuntimeError):
     """A disclosure-safe validation failure."""
+
+
+@dataclasses.dataclass(frozen=True)
+class DockerCliIdentity:
+    """Security-relevant identity checked around every Docker subprocess."""
+
+    command: str
+    canonical: str
+    command_device: int
+    command_inode: int
+    command_uid: int
+    command_gid: int
+    command_mode: int
+    device: int
+    inode: int
+    uid: int
+    gid: int
+    mode: int
+    size: int
+    mtime_ns: int
+    digest: str
+    mount_point: str
+    mount_source: str
+    filesystem: str
 
 
 def _utc_now() -> str:
@@ -510,18 +546,141 @@ def _docker_dataset_policy_args(raw_root: Path) -> list[str]:
     ]
 
 
-def _trusted_docker(asserted: Path | None = None) -> Path:
+def _effective_write(path: Path) -> bool:
+    try:
+        return os.access(path, os.W_OK, effective_ids=True)
+    except TypeError:  # pragma: no cover - POSIX supports effective_ids
+        return os.access(path, os.W_OK)
+
+
+def _replacement_writable(path: Path) -> bool:
+    """Whether the current user can replace any existing component of *path*."""
+    if os.name == "nt" or not path.is_absolute():
+        return True
+    euid = os.geteuid()  # type: ignore[attr-defined]
+    parts = path.parts
+    for index in range(1, len(parts)):
+        parent = Path(*parts[:index])
+        child = Path(*parts[: index + 1])
+        try:
+            writable = os.access(parent, os.W_OK | os.X_OK, effective_ids=True)
+            parent_info = parent.stat()
+            child_info = child.lstat()
+        except OSError:
+            return True
+        if not writable:
+            continue
+        sticky_protects = bool(parent_info.st_mode & stat.S_ISVTX) and euid not in {
+            0,
+            parent_info.st_uid,
+            child_info.st_uid,
+        }
+        if not sticky_protects:
+            return True
+    return False
+
+
+def _mount_provenance(path: Path) -> tuple[str, str, str, frozenset[str]]:
+    best: tuple[str, str, str, frozenset[str]] | None = None
+    best_length = -1
+    for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        separator = fields.index("-")
+        mount_point = fields[4].replace("\\040", " ")
+        mounted = Path(mount_point)
+        if path != mounted and mounted not in path.parents:
+            continue
+        if len(mount_point) <= best_length:
+            continue
+        options = frozenset((*fields[5].split(","), *fields[separator + 3].split(",")))
+        best = (mount_point, fields[separator + 2], fields[separator + 1], options)
+        best_length = len(mount_point)
+    if best is None:
+        raise ValidationError("Docker CLI mount provenance is unavailable")
+    return best
+
+
+def _docker_group_is_trusted(gid: int) -> bool:
+    try:
+        import grp
+        import pwd
+
+        group = grp.getgrgid(gid)  # type: ignore[attr-defined]
+        current_groups = set(os.getgroups()) | {  # type: ignore[attr-defined]
+            os.getgid()  # type: ignore[attr-defined]
+        }
+        member_uids = {
+            pwd.getpwnam(member).pw_uid  # type: ignore[attr-defined]
+            for member in group.gr_mem
+            if member
+        } | {
+            entry.pw_uid
+            for entry in pwd.getpwall()  # type: ignore[attr-defined]
+            if entry.pw_gid == gid
+        }
+    except (ImportError, KeyError, OSError):
+        return False
+    return _group_membership_trusted(gid, group.gr_name, current_groups, member_uids)
+
+
+def _group_membership_trusted(
+    gid: int, name: str, current_groups: set[int], member_uids: set[int]
+) -> bool:
+    return (
+        gid == 0
+        and name == REVIEWED_DOCKER_GROUP
+        and gid not in current_groups
+        and all(uid == 0 for uid in member_uids)
+    )
+
+
+def _validate_docker_evidence(
+    identity: DockerCliIdentity,
+    *,
+    command_is_symlink: bool,
+    group_trusted: bool,
+    effective_write: bool,
+    replacement_writable: bool,
+    mount_options: frozenset[str],
+) -> None:
+    if Path(identity.command) != REVIEWED_DOCKER_COMMAND:
+        raise ValidationError("Docker CLI command path differs from reviewed provenance")
+    if Path(identity.canonical) != REVIEWED_DOCKER_CANONICAL:
+        raise ValidationError("Docker CLI canonical path differs from reviewed provenance")
+    if not command_is_symlink or identity.command_uid != 0:
+        raise ValidationError("Docker CLI symlink provenance is unsafe")
+    if identity.uid != 0 or identity.mode & 0o002:
+        raise ValidationError("Docker CLI ownership or world-write mode is unsafe")
+    if identity.mode & 0o020 and not group_trusted:
+        raise ValidationError("Docker CLI group-write provenance is unsafe")
+    if effective_write:
+        raise ValidationError("Docker CLI is effectively writable by the validation user")
+    if replacement_writable:
+        raise ValidationError("Docker CLI can be replaced through its parent chain")
+    if (
+        Path(identity.mount_point) != REVIEWED_DOCKER_MOUNT
+        or identity.filesystem != REVIEWED_DOCKER_FILESYSTEM
+        or "ro" not in mount_options
+        or not re.fullmatch(r"/dev/loop[0-9]+", identity.mount_source)
+    ):
+        raise ValidationError("Docker CLI mount provenance differs from reviewed evidence")
+    if identity.digest != REVIEWED_DOCKER_CLI_SHA256:
+        raise ValidationError("Docker CLI digest differs from reviewed evidence")
+
+
+def _docker_identity(asserted: Path | None = None) -> DockerCliIdentity:
+    """Resolve and validate the reviewed Docker Desktop WSL CLI provenance."""
+    if os.name == "nt":
+        raise ValidationError("trusted Docker CLI requires WSL2")
     resolved_name = shutil.which("docker")
     if not resolved_name:
         raise ValidationError("trusted Docker CLI is unavailable")
-    docker = Path(resolved_name).resolve(strict=True)
-    repository = Path(__file__).resolve().parents[1]
-    home = Path.home().resolve()
-    if not docker.is_file() or repository in docker.parents or home in docker.parents:
-        raise ValidationError("Docker CLI is not a trusted system executable")
-    info = docker.stat()
-    if os.name != "nt" and (info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022):
-        raise ValidationError("Docker CLI ownership or mode is unsafe")
+    command = Path(resolved_name)
+    try:
+        command_info = command.lstat()
+        docker = command.resolve(strict=True)
+    except OSError as exc:
+        raise ValidationError("Docker CLI provenance is unavailable") from exc
     if asserted is not None:
         try:
             asserted_docker = asserted.resolve(strict=True)
@@ -529,7 +688,45 @@ def _trusted_docker(asserted: Path | None = None) -> Path:
             raise ValidationError("supplied Docker path is unavailable") from exc
         if asserted_docker != docker:
             raise ValidationError("supplied Docker path differs from the trusted CLI")
-    return docker
+    info = docker.stat()
+    if not stat.S_ISREG(info.st_mode):
+        raise ValidationError("Docker CLI canonical target is not a regular file")
+    mode = stat.S_IMODE(info.st_mode)
+    mount_point, mount_source, filesystem, options = _mount_provenance(docker)
+    digest = _sha256(docker)
+    identity = DockerCliIdentity(
+        command=str(command),
+        canonical=str(docker),
+        command_device=command_info.st_dev,
+        command_inode=command_info.st_ino,
+        command_uid=command_info.st_uid,
+        command_gid=command_info.st_gid,
+        command_mode=stat.S_IMODE(command_info.st_mode),
+        device=info.st_dev,
+        inode=info.st_ino,
+        uid=info.st_uid,
+        gid=info.st_gid,
+        mode=mode,
+        size=info.st_size,
+        mtime_ns=info.st_mtime_ns,
+        digest=digest,
+        mount_point=mount_point,
+        mount_source=mount_source,
+        filesystem=filesystem,
+    )
+    _validate_docker_evidence(
+        identity,
+        command_is_symlink=stat.S_ISLNK(command_info.st_mode),
+        group_trusted=_docker_group_is_trusted(info.st_gid),
+        effective_write=_effective_write(docker),
+        replacement_writable=_replacement_writable(command) or _replacement_writable(docker),
+        mount_options=options,
+    )
+    return identity
+
+
+def _trusted_docker(asserted: Path | None = None) -> Path:
+    return Path(_docker_identity(asserted).canonical)
 
 
 def _run_captured(
@@ -538,15 +735,110 @@ def _run_captured(
     return runner(list(command), text=True, capture_output=True, check=check)
 
 
-def _inspect_validator_image(docker: Path, image: str, runner: CommandRunner) -> dict[str, Any]:
+DockerIdentityProvider = Callable[[Path | None], DockerCliIdentity]
+
+
+def _run_trusted_docker(
+    docker: Path,
+    arguments: Sequence[str],
+    runner: CommandRunner,
+    *,
+    check: bool = False,
+    identity_provider: DockerIdentityProvider | None = None,
+) -> subprocess.CompletedProcess[str]:
+    identity_provider = identity_provider or _docker_identity
+    before = identity_provider(docker)
+    result = _run_captured(runner, [str(docker), *arguments], check=check)
+    after = identity_provider(docker)
+    if before != after:
+        raise ValidationError("Docker CLI identity changed during command execution")
+    return result
+
+
+def _verify_docker_cli_version(
+    docker: Path,
+    runner: CommandRunner,
+    identity_provider: DockerIdentityProvider | None = None,
+) -> None:
+    try:
+        result = _run_trusted_docker(
+            docker,
+            ["version", "--format", "{{.Client.Version}}"],
+            runner,
+            check=True,
+            identity_provider=identity_provider,
+        )
+    except subprocess.SubprocessError as exc:
+        raise ValidationError("Docker CLI version is unavailable") from exc
+    if result.stdout.strip() != REVIEWED_DOCKER_CLI_VERSION:
+        raise ValidationError("Docker CLI version differs from reviewed evidence")
+
+
+def _verify_docker_backend(
+    docker: Path,
+    runner: CommandRunner,
+    identity_provider: DockerIdentityProvider | None = None,
+) -> None:
+    template = (
+        '{"client":"{{.Client.Version}}","server":"{{.Server.Version}}",'
+        '"client_api":"{{.Client.APIVersion}}","server_api":"{{.Server.APIVersion}}",'
+        '"os":"{{.Server.Os}}","arch":"{{.Server.Arch}}"}'
+    )
+    try:
+        version = _run_trusted_docker(
+            docker,
+            ["version", "--format", template],
+            runner,
+            check=True,
+            identity_provider=identity_provider,
+        )
+        context = _run_trusted_docker(
+            docker,
+            ["context", "show"],
+            runner,
+            check=True,
+            identity_provider=identity_provider,
+        )
+        details = json.loads(version.stdout)
+    except (json.JSONDecodeError, subprocess.SubprocessError) as exc:
+        raise ValidationError("Docker backend provenance is unavailable") from exc
+    if (
+        details
+        != {
+            "client": REVIEWED_DOCKER_CLI_VERSION,
+            "server": REVIEWED_DOCKER_ENGINE_VERSION,
+            "client_api": REVIEWED_DOCKER_API_VERSION,
+            "server_api": REVIEWED_DOCKER_API_VERSION,
+            "os": "linux",
+            "arch": VALIDATOR_ARCHITECTURE,
+        }
+        or context.stdout.strip() != REVIEWED_DOCKER_CONTEXT
+    ):
+        raise ValidationError("Docker backend provenance differs from reviewed evidence")
+
+
+def _inspect_validator_image(
+    docker: Path,
+    image: str,
+    runner: CommandRunner,
+    identity_provider: DockerIdentityProvider | None = None,
+) -> dict[str, Any]:
     if image != VALIDATOR_IMAGE or "@sha256:" not in image or image.endswith(":latest"):
         raise ValidationError("validator image is not the exact pinned digest")
     try:
-        _run_captured(runner, [str(docker), "info"], check=True)
+        _run_trusted_docker(
+            docker, ["info"], runner, check=True, identity_provider=identity_provider
+        )
     except subprocess.SubprocessError as exc:
         raise ValidationError("Docker daemon is unavailable") from exc
     try:
-        result = _run_captured(runner, [str(docker), "image", "inspect", image], check=True)
+        result = _run_trusted_docker(
+            docker,
+            ["image", "inspect", image],
+            runner,
+            check=True,
+            identity_provider=identity_provider,
+        )
     except subprocess.SubprocessError as exc:
         raise ValidationError("validator image is missing") from exc
     try:
@@ -636,23 +928,42 @@ def _parse_validator_result(stdout: str, returncode: int) -> dict[str, Any]:
     }
 
 
+def _parse_validator_version(stdout: str) -> str:
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", stdout).strip()
+    match = re.fullmatch(r"(?:bids-validator\s+)?(3\.0\.0)", plain)
+    if match is None:
+        raise ValidationError("BIDS Validator version differs from the pinned version")
+    return match.group(1)
+
+
 def _run_validator(
     docker: Path,
     image: str,
     raw_root: Path,
     output_path: Path,
     runner: CommandRunner = subprocess.run,
+    identity_provider: DockerIdentityProvider | None = None,
 ) -> dict[str, Any]:
-    _inspect_validator_image(docker, image, runner)
+    _verify_docker_cli_version(docker, runner, identity_provider)
+    _verify_docker_backend(docker, runner, identity_provider)
+    _inspect_validator_image(docker, image, runner, identity_provider)
     base_policy = _docker_base_policy_args()
-    version_result = _run_captured(runner, [str(docker), *base_policy, image, "--version"])
-    version = version_result.stdout.strip()
-    if version_result.returncode != 0 or version != VALIDATOR_VERSION:
+    version_result = _run_trusted_docker(
+        docker,
+        [*base_policy, image, "--version"],
+        runner,
+        identity_provider=identity_provider,
+    )
+    if version_result.returncode != 0:
         raise ValidationError("BIDS Validator version differs from the pinned version")
+    version = _parse_validator_version(version_result.stdout)
     started = _utc_now()
     dataset_policy = _docker_dataset_policy_args(raw_root)
-    result = _run_captured(
-        runner, [str(docker), *dataset_policy, image, "/data", "--format", "json"]
+    result = _run_trusted_docker(
+        docker,
+        [*dataset_policy, image, "/data", "--format", "json"],
+        runner,
+        identity_provider=identity_provider,
     )
     completed = _utc_now()
     fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -830,7 +1141,7 @@ def _error_category(exc: BaseException) -> str:
     message = str(exc).casefold()
     rules = (
         (("wsl2", "ubuntu 24.04"), "runtime_unsupported"),
-        (("trusted docker", "docker cli", "supplied docker"), "docker_untrusted"),
+        (("trusted docker", "docker cli", "supplied docker", "docker backend"), "docker_untrusted"),
         (("docker daemon",), "docker_unavailable"),
         (("evidence mode", "evidence is missing", "owner"), "evidence_permission_invalid"),
         (("receipt manifest", "manifest digest"), "manifest_binding_invalid"),

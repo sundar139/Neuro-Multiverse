@@ -29,6 +29,29 @@ def _load_tool() -> ModuleType:
 tool = _load_tool()
 
 
+def _docker_identity(_asserted: Path | None = None) -> Any:
+    return tool.DockerCliIdentity(
+        command=str(tool.REVIEWED_DOCKER_COMMAND),
+        canonical=str(tool.REVIEWED_DOCKER_CANONICAL),
+        command_device=1,
+        command_inode=2,
+        command_uid=0,
+        command_gid=0,
+        command_mode=0o777,
+        device=3,
+        inode=4,
+        uid=0,
+        gid=0,
+        mode=0o775,
+        size=5,
+        mtime_ns=6,
+        digest=tool.REVIEWED_DOCKER_CLI_SHA256,
+        mount_point=str(tool.REVIEWED_DOCKER_MOUNT),
+        mount_source="/dev/loop0",
+        filesystem=tool.REVIEWED_DOCKER_FILESYSTEM,
+    )
+
+
 def _json(path: Path, value: dict[str, Any]) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
     if os.name != "nt":
@@ -264,6 +287,20 @@ def _validator_result(errors: int = 0, warnings: int = 0) -> str:
 
 def _docker_runner(validator_output: str, returncode: int = 0) -> Any:
     def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if command[1:3] == ["version", "--format"]:
+            if command[-1].startswith('{"client"'):
+                backend = {
+                    "client": tool.REVIEWED_DOCKER_CLI_VERSION,
+                    "server": tool.REVIEWED_DOCKER_ENGINE_VERSION,
+                    "client_api": tool.REVIEWED_DOCKER_API_VERSION,
+                    "server_api": tool.REVIEWED_DOCKER_API_VERSION,
+                    "os": "linux",
+                    "arch": "amd64",
+                }
+                return subprocess.CompletedProcess(command, 0, json.dumps(backend), "")
+            return subprocess.CompletedProcess(command, 0, tool.REVIEWED_DOCKER_CLI_VERSION, "")
+        if command[1:] == ["context", "show"]:
+            return subprocess.CompletedProcess(command, 0, tool.REVIEWED_DOCKER_CONTEXT, "")
         if command[-1] == "info":
             return subprocess.CompletedProcess(command, 0, "ok", "")
         if command[-3:-1] == ["image", "inspect"]:
@@ -282,9 +319,20 @@ def _docker_runner(validator_output: str, returncode: int = 0) -> Any:
     return run
 
 
+def _run_validator(*args: Any) -> dict[str, Any]:
+    return cast(dict[str, Any], tool._run_validator(*args, identity_provider=_docker_identity))
+
+
+def _inspect_validator_image(*args: Any) -> dict[str, Any]:
+    return cast(
+        dict[str, Any],
+        tool._inspect_validator_image(*args, identity_provider=_docker_identity),
+    )
+
+
 def test_validator_error_makes_gate_fail(tmp_path: Path) -> None:
     with pytest.raises(tool.ValidationError, match="reported errors"):
-        tool._run_validator(
+        _run_validator(
             Path("docker"),
             tool.VALIDATOR_IMAGE,
             tmp_path,
@@ -294,7 +342,7 @@ def test_validator_error_makes_gate_fail(tmp_path: Path) -> None:
 
 
 def test_validator_warning_is_retained_and_classified(tmp_path: Path) -> None:
-    result = tool._run_validator(
+    result = _run_validator(
         Path("docker"),
         tool.VALIDATOR_IMAGE,
         tmp_path,
@@ -367,73 +415,116 @@ def test_docker_policy_is_offline_read_only_and_minimally_mounted(tmp_path: Path
     assert "--config" not in dataset and "--ignoreNiftiHeaders" not in dataset
 
 
-def test_repository_local_docker_is_rejected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _trust_evidence(**changes: Any) -> Any:
+    return tool.dataclasses.replace(_docker_identity(), **changes)
+
+
+def _accept_evidence(identity: Any, **changes: Any) -> None:
+    facts = {
+        "command_is_symlink": True,
+        "group_trusted": True,
+        "effective_write": False,
+        "replacement_writable": False,
+        "mount_options": frozenset({"ro"}),
+        **changes,
+    }
+    tool._validate_docker_evidence(identity, **facts)
+
+
+def test_root_owned_755_docker_evidence_passes() -> None:
+    _accept_evidence(_trust_evidence(mode=0o755))
+
+
+def test_root_owned_775_requires_reviewed_group_evidence() -> None:
+    with pytest.raises(tool.ValidationError, match="group-write"):
+        _accept_evidence(_trust_evidence(mode=0o775), group_trusted=False)
+    _accept_evidence(_trust_evidence(mode=0o775), group_trusted=True)
+
+
+@pytest.mark.parametrize(
+    ("current_groups", "member_uids"),
+    [({0, 1000}, {0}), ({1000}, {0, 1001})],
+)
+def test_reviewed_group_rejects_current_or_unprivileged_members(
+    current_groups: set[int], member_uids: set[int]
 ) -> None:
-    fake = Path(__file__).parents[1] / "docker"
-    monkeypatch.setattr(tool.shutil, "which", lambda _name: str(fake))
-    monkeypatch.setattr(tool.Path, "resolve", lambda self, strict=False: self)
-    monkeypatch.setattr(tool.Path, "is_file", lambda self: True)
-    with pytest.raises(tool.ValidationError, match="trusted system"):
-        tool._trusted_docker(fake)
+    assert not tool._group_membership_trusted(0, "root", current_groups, member_uids)
 
 
-def test_user_home_docker_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = Path.home() / "bin" / "docker"
-    monkeypatch.setattr(tool.shutil, "which", lambda _name: str(fake))
-    monkeypatch.setattr(tool.Path, "resolve", lambda self, strict=False: self)
-    monkeypatch.setattr(tool.Path, "is_file", lambda self: True)
-    with pytest.raises(tool.ValidationError, match="trusted system"):
-        tool._trusted_docker(fake)
+def test_reviewed_group_accepts_root_only_membership() -> None:
+    assert tool._group_membership_trusted(0, "root", {1000}, {0})
 
 
-@pytest.mark.skipif(os.name != "nt", reason="uses the Windows trusted system executable")
-def test_trusted_system_docker_path_and_wrong_assertion(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("changes", "facts", "message"),
+    [
+        ({"uid": 1000}, {}, "ownership"),
+        ({"mode": 0o777}, {"group_trusted": True}, "world-write"),
+        ({}, {"effective_write": True}, "effectively writable"),
+        ({}, {"replacement_writable": True}, "parent chain"),
+        ({"digest": "0" * 64}, {}, "digest"),
+        ({"filesystem": "ext4"}, {}, "mount provenance"),
+        ({}, {"command_is_symlink": False}, "symlink provenance"),
+    ],
+)
+def test_docker_evidence_fails_closed(
+    changes: dict[str, Any], facts: dict[str, Any], message: str
 ) -> None:
-    trusted = Path(r"C:\Windows\System32\where.exe")
-    monkeypatch.setattr(tool.shutil, "which", lambda _name: str(trusted))
-    assert tool._trusted_docker(trusted) == trusted.resolve()
-    with pytest.raises(tool.ValidationError, match="differs"):
-        tool._trusted_docker(Path(r"C:\Windows\System32\whoami.exe"))
+    with pytest.raises(tool.ValidationError, match=message):
+        _accept_evidence(_trust_evidence(**changes), **facts)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode enforcement")
-def test_trusted_system_docker_path_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
-    docker = Path("/usr/bin/docker")
-    resolved_docker = docker.resolve()
-    original_stat = tool.Path.stat
-
-    def trusted_stat(path: Path, *args: Any, **kwargs: Any) -> Any:
-        result = original_stat(path, *args, **kwargs)
-        if path == resolved_docker:
-            return SimpleNamespace(st_uid=0, st_mode=0o100755)
-        return result
-
-    monkeypatch.setattr(tool.shutil, "which", lambda _name: str(docker))
-    monkeypatch.setattr(tool.Path, "stat", trusted_stat)
-    assert tool._trusted_docker(docker) == resolved_docker
+@pytest.mark.skipif(os.name == "nt", reason="POSIX replacement semantics")
+def test_user_writable_parent_and_symlink_chain_are_rejected(tmp_path: Path) -> None:
+    parent = tmp_path / "writable"
+    parent.mkdir(mode=0o700)
+    target = parent / "docker-real"
+    target.write_text("synthetic", encoding="utf-8")
+    link = parent / "docker"
+    link.symlink_to(target)
+    assert tool._replacement_writable(target)
+    assert tool._replacement_writable(link)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode enforcement")
-@pytest.mark.parametrize("mode", [0o100020, 0o100002])
-def test_writable_docker_is_rejected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: int
-) -> None:
-    fake = tmp_path / "docker"
-    fake.write_text("synthetic", encoding="utf-8")
-    original_stat = tool.Path.stat
+@pytest.mark.parametrize("field", ["digest", "inode", "device"])
+def test_docker_change_during_command_is_rejected(field: str) -> None:
+    before = _docker_identity()
+    after = tool.dataclasses.replace(
+        before,
+        **{field: "0" * 64 if field == "digest" else getattr(before, field) + 1},
+    )
+    identities = iter((before, after))
+    with pytest.raises(tool.ValidationError, match="changed during"):
+        tool._run_trusted_docker(
+            Path("/synthetic/docker"),
+            ["info"],
+            _docker_runner(_validator_result()),
+            identity_provider=lambda _path: next(identities),
+        )
 
-    def fake_stat(path: Path, *args: Any, **kwargs: Any) -> Any:
-        result = original_stat(path, *args, **kwargs)
-        if path == fake:
-            return SimpleNamespace(st_uid=0, st_mode=mode)
-        return result
 
-    monkeypatch.setattr(tool.shutil, "which", lambda _name: str(fake))
-    monkeypatch.setattr(tool.Path, "stat", fake_stat)
-    with pytest.raises(tool.ValidationError, match="ownership or mode"):
-        tool._trusted_docker(fake)
+def test_docker_cli_version_is_pinned() -> None:
+    base = _docker_runner(_validator_result())
+
+    def updated(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if command[1:3] == ["version", "--format"]:
+            return subprocess.CompletedProcess(command, 0, "29.5.4", "")
+        return cast(subprocess.CompletedProcess[str], base(command, **kwargs))
+
+    with pytest.raises(tool.ValidationError, match="version differs"):
+        tool._verify_docker_cli_version(Path("/synthetic/docker"), updated, _docker_identity)
+
+
+def test_docker_backend_and_context_are_pinned() -> None:
+    base = _docker_runner(_validator_result())
+
+    def changed_context(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if command[1:] == ["context", "show"]:
+            return subprocess.CompletedProcess(command, 0, "unexpected", "")
+        return cast(subprocess.CompletedProcess[str], base(command, **kwargs))
+
+    with pytest.raises(tool.ValidationError, match="backend provenance differs"):
+        tool._verify_docker_backend(Path("/synthetic/docker"), changed_context, _docker_identity)
 
 
 @pytest.mark.parametrize(
@@ -441,7 +532,7 @@ def test_writable_docker_is_rejected(
 )
 def test_mutable_or_wrong_validator_image_is_rejected(tmp_path: Path, image: str) -> None:
     with pytest.raises(tool.ValidationError, match="pinned digest"):
-        tool._inspect_validator_image(Path("docker"), image, _docker_runner(_validator_result()))
+        _inspect_validator_image(Path("docker"), image, _docker_runner(_validator_result()))
 
 
 def test_missing_local_validator_image_is_rejected() -> None:
@@ -451,7 +542,7 @@ def test_missing_local_validator_image_is_rejected() -> None:
         raise subprocess.CalledProcessError(1, command)
 
     with pytest.raises(tool.ValidationError, match="image is missing"):
-        tool._inspect_validator_image(Path("docker"), tool.VALIDATOR_IMAGE, missing)
+        _inspect_validator_image(Path("docker"), tool.VALIDATOR_IMAGE, missing)
 
 
 def test_non_linux_validator_image_is_rejected() -> None:
@@ -470,7 +561,7 @@ def test_non_linux_validator_image_is_rejected() -> None:
         return cast(subprocess.CompletedProcess[str], base(command, **kwargs))
 
     with pytest.raises(tool.ValidationError, match="operating system"):
-        tool._inspect_validator_image(Path("docker"), tool.VALIDATOR_IMAGE, non_linux)
+        _inspect_validator_image(Path("docker"), tool.VALIDATOR_IMAGE, non_linux)
 
 
 def test_image_disappearance_cannot_pull(tmp_path: Path) -> None:
@@ -484,7 +575,7 @@ def test_image_disappearance_cannot_pull(tmp_path: Path) -> None:
         return cast(subprocess.CompletedProcess[str], base(command, **kwargs))
 
     with pytest.raises(tool.ValidationError, match="version differs"):
-        tool._run_validator(
+        _run_validator(
             Path("docker"),
             tool.VALIDATOR_IMAGE,
             tmp_path,
@@ -503,13 +594,18 @@ def test_validator_version_mismatch_is_rejected(tmp_path: Path) -> None:
         return cast(subprocess.CompletedProcess[str], base(command, **kwargs))
 
     with pytest.raises(tool.ValidationError, match="version differs"):
-        tool._run_validator(
+        _run_validator(
             Path("docker"),
             tool.VALIDATOR_IMAGE,
             tmp_path,
             tmp_path / "output.json",
             wrong_version,
         )
+
+
+def test_validator_version_parser_accepts_reviewed_ansi_output() -> None:
+    output = "\x1b[1mbids-validator\x1b[22m \x1b[94m3.0.0\x1b[39m"
+    assert tool._parse_validator_version(output) == "3.0.0"
 
 
 def test_subject_token_does_not_disclose_subject() -> None:
@@ -522,7 +618,7 @@ def test_validator_output_is_created_mode_600(
     tmp_path: Path,
 ) -> None:
     output = tmp_path / "validator.json"
-    tool._run_validator(
+    _run_validator(
         Path("docker"),
         tool.VALIDATOR_IMAGE,
         tmp_path,
@@ -698,25 +794,10 @@ def test_synthetic_end_to_end_validate_is_read_only(
     _json(receipt_path, receipt)
     output_dir = tmp_path / "reports"
     output_dir.mkdir(mode=0o700)
-    docker = Path(r"C:\Windows\System32\where.exe") if os.name == "nt" else Path("/usr/bin/docker")
-    resolved_docker = docker.resolve()
-    original_which = tool.shutil.which
-    monkeypatch.setattr(
-        tool.shutil,
-        "which",
-        lambda name: str(docker) if name == "docker" else original_which(name),
-    )
+    docker = Path("/usr/bin/docker")
+    monkeypatch.setattr(tool, "_docker_identity", _docker_identity)
     if os.name != "nt":
         manifest_path.chmod(0o600)
-        original_stat = tool.Path.stat
-
-        def trusted_stat(path: Path, *args: Any, **kwargs: Any) -> Any:
-            result = original_stat(path, *args, **kwargs)
-            if path == resolved_docker:
-                return SimpleNamespace(st_uid=0, st_mode=0o100755)
-            return result
-
-        monkeypatch.setattr(tool.Path, "stat", trusted_stat)
     else:
         monkeypatch.setattr(tool, "_mode_private", lambda _path: True)
     monkeypatch.setattr(tool, "_require_runtime", lambda: None)
