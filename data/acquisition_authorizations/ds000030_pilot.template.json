@@ -1,0 +1,17 @@
+{
+  "schema_version": "1",
+  "decision": "not_approved",
+  "dataset_accession": "ds000030",
+  "acquisition_scope_id": "ds000030_pilot_5_subjects",
+  "snapshot": "1.0.0",
+  "doi": "10.18112/openneuro.ds000030.v1.0.0",
+  "canonical_plan_sha256": "PLACEHOLDER_fill_from_reviewed_plan_digest",
+  "expected_file_count": 0,
+  "expected_transfer_bytes": 0,
+  "size_evidence_reference": "PLACEHOLDER_ds000030-pilot-plan-sha256",
+  "storage_evidence_reference": "PLACEHOLDER_storage-readiness-sha256",
+  "approved_code_commit": "PLACEHOLDER_reviewed_executor_commit",
+  "approval_timestamp_utc": "PLACEHOLDER_utc_iso8601",
+  "approval_id": "PLACEHOLDER_unique_id",
+  "reviewer_role": "PLACEHOLDER_independent_reviewer_role"
+}

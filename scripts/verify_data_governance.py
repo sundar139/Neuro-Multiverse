@@ -45,6 +45,13 @@ from neuromultiverse.data_contracts import (
     LicenseStatus,
     openneuro_doi_is_valid,
 )
+from neuromultiverse.ds000030_pilot import (
+    CONTROLLED_RESERVE_BYTES,
+    DS000030_PILOT_EXPECTED_BYTES,
+    DS000030_PILOT_FILE_COUNT,
+    DS000030_PILOT_PLAN_REFERENCE,
+    DS000030_STORAGE_REFERENCE,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CITATION_INVENTORY = REPO_ROOT / "docs" / "citation_inventory.md"
@@ -69,28 +76,21 @@ OPTIONAL_IDS = frozenset({"cobre_raw", "aomic_id1000"})
 DS000030_PILOT_SUBJECT_COUNT = 5
 DS000030_PLANNED_RQ5_SUBJECT_COUNT = 20
 
-# Controlled raw-processing free-space reserve (250 GiB), used as the storage
-# margin required before any acquisition.
-CONTROLLED_RESERVE_BYTES = 268435456000
-
-# Aggregate, disclosure-safe pilot evidence, transcribed from the external
-# metadata-only preflight (no participant identifier, no external absolute path).
-# The exact transfer total is the sum of provider-reported file sizes for the
-# five-subject plan; the references are opaque SHA-256 digests of the external
-# plan and storage-readiness records.
-DS000030_PILOT_FILE_COUNT = 22
-DS000030_PILOT_EXPECTED_BYTES = 187570603
+# Aggregate pilot evidence is the single source of truth in ``ds000030_pilot``
+# (imported above): file count, transfer bytes, plan reference, storage
+# reference, and the 250 GiB reserve. Only the measured available capacity is
+# local to the preflight record.
 DS000030_STORAGE_AVAILABLE_BYTES = 996303314944
-DS000030_PILOT_PLAN_REFERENCE = (
-    "ds000030-pilot-plan-sha256:c6a86234b90b94b184dbb5adc5c6000a7bffefa6cb799a9590b53f3433b1ae4b"
-)
-DS000030_STORAGE_REFERENCE = (
-    "storage-readiness-sha256:3d28205a55ed386c8b5f5ac1bbb123c8d5efc505e11ee55a612d52ce90fd6acd"
-)
 
 # External hash-manifest evidence a dataset must reference to claim a verified
 # hash strategy. The manifest itself is created outside Git at acquisition.
 HASH_MANIFEST_BASENAME = "checksums.sha256"
+
+# Executor + approval surfaces this validator inspects (never reads private
+# selected identifiers or the external plan).
+EXECUTOR = REPO_ROOT / "scripts" / "acquire_ds000030_pilot.py"
+PILOT_MODEL = REPO_ROOT / "src" / "neuromultiverse" / "ds000030_pilot.py"
+APPROVAL_DIR = REPO_ROOT / "data" / "acquisition_authorizations"
 
 # The exact citation DOI required for each verified citation-inventory topic.
 REQUIRED_CITATION_DOIS = {
@@ -305,6 +305,10 @@ def required_records() -> list[DatasetAccessRecord]:
 
 
 _SELECTED_ID_RE = re.compile(r"\bsub-\d{5}\b")
+# A signed/pre-authenticated provider URL (S3 query-string credentials).
+_SIGNED_URL_RE = re.compile(
+    r"\?(?:[^ \n]*&)?(?:versionId|X-Amz-Signature|X-Amz-Credential|Signature|AWSAccessKeyId)="
+)
 # A real, non-portable rendering of the external data root (an absolute /home or
 # /mnt path that reaches neuromultiverse-data). The portable "$HOME/..." form and
 # unrelated /mnt/c split-stack discussion are intentionally not matched.
@@ -336,7 +340,7 @@ def _tracked_text_files() -> list[Path]:
 
 
 def _check_no_selected_identifiers() -> list[str]:
-    """No pilot subject identifier or external absolute path may be committed."""
+    """No pilot subject identifier, external absolute path, or signed URL committed."""
     problems: list[str] = []
     for path in _tracked_text_files():
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -345,6 +349,47 @@ def _check_no_selected_identifiers() -> list[str]:
             problems.append(f"{rel}: a ds000030 subject identifier appears in a tracked file")
         if _EXTERNAL_ABS_PATH_RE.search(text):
             problems.append(f"{rel}: an external absolute path appears in a tracked file")
+        if _SIGNED_URL_RE.search(text):
+            problems.append(f"{rel}: a signed provider URL appears in a tracked file")
+    return problems
+
+
+def _check_executor_hardening() -> list[str]:
+    """The executor and pilot schema must keep the acquisition gate strong."""
+    problems: list[str] = []
+    executor = EXECUTOR.read_text(encoding="utf-8")
+    model = PILOT_MODEL.read_text(encoding="utf-8")
+
+    if 'add_argument("--approved"' in executor:
+        problems.append("executor still defines a --approved boolean bypass")
+    if "--approval-record" not in executor:
+        problems.append("executor does not require an external approval record")
+    if "completion_status" not in executor or "sha256_file" not in executor:
+        problems.append("executor lacks integrity-aware (SHA-256) completion")
+    if "return target.exists() and target.stat().st_size == expected_size" in executor:
+        problems.append("executor still uses size-only completion")
+    # The checksum manifest lives under the external target root, not in Git.
+    if "checksums.sha256" not in executor:
+        problems.append("executor does not reference an external checksum manifest")
+
+    if 'extra="forbid"' not in model:
+        problems.append("pilot schema is not strict (extra must be forbidden)")
+    if re.search(r"(?i)\b(download_url|signed_url)\b|\burl\b\s*[:=]\s*str", model):
+        problems.append("pilot plan schema appears to accept a download-URL field")
+
+    templates = list(APPROVAL_DIR.glob("*.template.json"))
+    if not templates:
+        problems.append("acquisition approval template is missing")
+    for tpl in templates:
+        data = json.loads(tpl.read_text(encoding="utf-8"))
+        if data.get("decision") != "not_approved":
+            problems.append(f"{tpl.name}: approval template must be decision=not_approved")
+    for record in APPROVAL_DIR.glob("*.json"):
+        if record.name.endswith(".template.json"):
+            continue
+        data = json.loads(record.read_text(encoding="utf-8"))
+        if data.get("decision") == "approved":
+            problems.append(f"{record.name}: a committed approval record must not authorize")
     return problems
 
 
@@ -500,6 +545,7 @@ def check(records: list[DatasetAccessRecord]) -> list[str]:
             problems.append(f"{rid}: independent_approval_verified must be false in this preflight")
 
     problems.extend(_check_no_selected_identifiers())
+    problems.extend(_check_executor_hardening())
     problems.extend(_check_citation_dois())
     problems.extend(_check_false_attribution())
     problems.extend(_check_manual_actions(records))

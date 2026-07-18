@@ -72,13 +72,24 @@ If a large file or dataset is committed by accident, stop and report it before p
 
 ---
 
-## 6. System boundary
+## 6. Dataset acquisition safety
+
+The ds000030 pilot executor (`scripts/acquire_ds000030_pilot.py`) is a network-facing tool and is gated accordingly.
+
+- **No boolean approval.** Execution requires a separate external approval record (mode 600) whose `decision` is `approved` and whose plan digest, scope, snapshot, DOI, file count, bytes, and evidence references match the reviewed plan and committed governance record. A command-line flag cannot establish approval; there is no `--approved` boolean. Execution additionally requires a clean working tree and an executor byte-identical to the approved code commit.
+- **No persisted URLs.** The external plan holds no download URL. At execution time each object URL is resolved from the official OpenNeuro metadata endpoint, must be HTTPS to an allowlisted host, and is rejected for `http`/`ftp`/`file` schemes, loopback, localhost, private, link-local, or unknown hosts. Every redirect target is re-validated before it is followed. Resolution fails closed unless exactly one metadata object matches the approved path, id, and size. Signed URLs are never printed, logged, or persisted.
+- **Integrity, not size.** A file is complete only when its size and a recomputed SHA-256 match the external checksum manifest; a same-size file without a valid checksum is never trusted. Downloads stream to a `.partial`, are hashed and size-verified, `fsync`ed, and atomically promoted only after all checks pass. The checksum manifest and JSON-Lines acquisition events live outside Git (mode 600) and contain no URL or credential.
+- **Dry-run is a gate.** The default `--dry-run` performs zero provider body requests, prints only aggregate identifier-free output, and exits nonzero on any precondition failure.
+
+---
+
+## 7. System boundary
 
 This repository does not silently install or reconfigure system-wide software. WSL2 distributions, Docker Desktop, GPU drivers, R, FSL, AFNI, FreeSurfer, `.wslconfig`, global Git configuration, and global VS Code configuration are all outside its scope. Their status is discovered and reported; changing them is a deliberate manual action by the user.
 
 ---
 
-## 7. Reporting an accidental exposure
+## 8. Reporting an accidental exposure
 
 If a secret, license, credential, or participant datum is exposed — committed, pushed, logged, or pasted — treat it as compromised. Assume disclosure; do not assume nobody noticed.
 
