@@ -72,6 +72,7 @@ def _access_kwargs(**overrides: Any) -> dict[str, Any]:
         "storage_verified": False,
         "hash_strategy_verified": True,
         "independent_approval_verified": False,
+        "independent_approval_reference": None,
         "required_manual_action": None,
         "acquisition_permitted": False,
     }
@@ -167,6 +168,7 @@ def _permittable_kwargs(**overrides: Any) -> dict[str, Any]:
     base = _access_kwargs(
         **_VALID_STORAGE,
         independent_approval_verified=True,
+        independent_approval_reference="synthetic-independent-approval",
         acquisition_permitted=True,
     )
     base.update(overrides)
@@ -176,6 +178,27 @@ def _permittable_kwargs(**overrides: Any) -> dict[str, Any]:
 def test_permitted_ready_with_all_prerequisites_is_allowed() -> None:
     record = DatasetAccessRecord(**_permittable_kwargs())
     assert record.acquisition_permitted is True
+
+
+def test_verified_approval_requires_reference() -> None:
+    with pytest.raises(ValidationError, match="approval reference"):
+        DatasetAccessRecord(**_access_kwargs(independent_approval_verified=True))
+
+
+def test_unverified_approval_rejects_reference() -> None:
+    with pytest.raises(ValidationError, match="must be None"):
+        DatasetAccessRecord(**_access_kwargs(independent_approval_reference="synthetic-approval"))
+
+
+def test_blocked_access_rejects_approval_reference() -> None:
+    with pytest.raises(ValidationError, match=r"blocked|must be None"):
+        DatasetAccessRecord(
+            **_access_kwargs(
+                access_status=AccessStatus.AUTHORIZATION_PENDING,
+                required_manual_action="await approval",
+                independent_approval_reference="synthetic-approval",
+            )
+        )
 
 
 def test_citation_verified_false_blocks_acquisition() -> None:
@@ -189,6 +212,7 @@ def test_size_verified_false_blocks_acquisition() -> None:
             **_access_kwargs(
                 acquisition_permitted=True,
                 independent_approval_verified=True,
+                independent_approval_reference="synthetic-independent-approval",
                 size_verified=False,
                 size_scope_id=None,
                 size_evidence_reference=None,
@@ -320,7 +344,12 @@ def test_size_evidence_reference_absent_when_unverified() -> None:
 
 def test_independent_approval_required_for_acquisition() -> None:
     with pytest.raises(ValidationError, match="independent_approval_verified"):
-        DatasetAccessRecord(**_permittable_kwargs(independent_approval_verified=False))
+        DatasetAccessRecord(
+            **_permittable_kwargs(
+                independent_approval_verified=False,
+                independent_approval_reference=None,
+            )
+        )
 
 
 def test_storage_verified_requires_all_evidence() -> None:
@@ -669,7 +698,7 @@ def test_normalize_whitespace_collapses_runs() -> None:
 
 def test_governance_records_carry_scope_matched_evidence() -> None:
     """Every verified size is scope-matched; ds000030 pilot storage is verified;
-    no record is acquisition-permitted or independently approved yet."""
+    only the bounded ds000030 pilot is independently approved."""
     gov = _load_governance_validator()
     records = {r.dataset_id: r for r in gov.required_records()}
     for rid in ("cobre_niak", "ds000030"):
@@ -679,7 +708,12 @@ def test_governance_records_carry_scope_matched_evidence() -> None:
     assert abide.size_verified is False and abide.size_scope_id is None
     ds = records["ds000030"]
     assert ds.storage_verified is True and ds.storage_scope_id == ds.acquisition_scope_id
+    assert ds.acquisition_permitted is True and ds.independent_approval_verified is True
+    assert ds.independent_approval_reference == gov.DS000030_APPROVAL_REFERENCE
     assert records["cobre_niak"].storage_verified is False
-    for rec in records.values():
+    for rid, rec in records.items():
+        if rid == "ds000030":
+            continue
         assert rec.acquisition_permitted is False
         assert rec.independent_approval_verified is False
+        assert rec.independent_approval_reference is None

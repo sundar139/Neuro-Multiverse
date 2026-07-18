@@ -222,6 +222,7 @@ class DatasetAccessRecord(BaseModel):
     # independent reviewer has approved this governance record; a preflight that
     # merely satisfies the technical prerequisites is never that approval.
     independent_approval_verified: bool
+    independent_approval_reference: str | None = None
     # Present (nonblank) exactly when access is gated; ``None`` when READY.
     required_manual_action: str | None = None
     acquisition_permitted: bool
@@ -341,6 +342,18 @@ class DatasetAccessRecord(BaseModel):
         if not blocking and action is not None:
             raise ValueError("a READY dataset must not carry a required_manual_action")
 
+        approval_ref = self.independent_approval_reference
+        if self.independent_approval_verified:
+            if not (approval_ref and approval_ref.strip()):
+                raise ValueError("independent approval requires a nonblank approval reference")
+            _reject_home_paths(approval_ref, "independent_approval_reference")
+        elif approval_ref is not None:
+            raise ValueError(
+                "independent_approval_reference must be None without verified approval"
+            )
+        if blocking and approval_ref is not None:
+            raise ValueError("a blocked access state cannot carry an approval reference")
+
         # Acquisition is gated on every prerequisite being verified at once.
         if self.acquisition_permitted:
             if self.access_status is not AccessStatus.READY:
@@ -370,6 +383,8 @@ class DatasetAccessRecord(BaseModel):
                 raise ValueError("acquisition_permitted requires a verified expected_size_bytes")
             if self.required_manual_action is not None:
                 raise ValueError("acquisition_permitted requires required_manual_action is None")
+            if not self.independent_approval_reference:
+                raise ValueError("acquisition_permitted requires an independent approval reference")
         return self
 
 

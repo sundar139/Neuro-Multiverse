@@ -31,6 +31,7 @@ the repository). The script exits nonzero on any inconsistency.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import tempfile
@@ -81,6 +82,15 @@ DS000030_PLANNED_RQ5_SUBJECT_COUNT = 20
 # reference, and the 250 GiB reserve. Only the measured available capacity is
 # local to the preflight record.
 DS000030_STORAGE_AVAILABLE_BYTES = 996303314944
+DS000030_APPROVAL_REFERENCE = "nm-ds000030-pilot-20260718-chatgpt-audit-001"
+APPROVED_EXECUTOR_FILE_SHA256 = {
+    "scripts/acquire_ds000030_pilot.py": (
+        "63a4d7bc699a63f09b1daac4d3703d1ef0716aa0133371e5ddb3855da0ce219f"
+    ),
+    "src/neuromultiverse/ds000030_pilot.py": (
+        "159f1c4251c5eb81ed6be5a915485e19983977e4447834e006fa8f84ccb58d74"
+    ),
+}
 
 # External hash-manifest evidence a dataset must reference to claim a verified
 # hash strategy. The manifest itself is created outside Git at acquisition.
@@ -242,9 +252,10 @@ def required_records() -> list[DatasetAccessRecord]:
             size_verified=True,
             storage_verified=True,
             hash_strategy_verified=True,
-            independent_approval_verified=False,
+            independent_approval_verified=True,
+            independent_approval_reference=DS000030_APPROVAL_REFERENCE,
             required_manual_action=None,
-            acquisition_permitted=False,
+            acquisition_permitted=True,
         ),
         DatasetAccessRecord(
             dataset_id="cobre_niak",
@@ -622,9 +633,22 @@ def check(records: list[DatasetAccessRecord]) -> list[str]:
                 problems.append(
                     "ds000030: size_evidence_reference does not match the approved plan"
                 )
-        # Independent approval must remain unverified in this preflight.
-        if record.independent_approval_verified:
-            problems.append(f"{rid}: independent_approval_verified must be false in this preflight")
+        if rid == "ds000030":
+            if record.independent_approval_reference != DS000030_APPROVAL_REFERENCE:
+                problems.append("ds000030: independent approval reference mismatch")
+            if not record.independent_approval_verified or not record.acquisition_permitted:
+                problems.append("ds000030: approved pilot must be acquisition-permitted")
+        elif (
+            record.independent_approval_verified
+            or record.independent_approval_reference is not None
+            or record.acquisition_permitted
+        ):
+            problems.append(f"{rid}: only ds000030 pilot is authorized for acquisition")
+
+    for rel, expected in APPROVED_EXECUTOR_FILE_SHA256.items():
+        actual = hashlib.sha256((REPO_ROOT / rel).read_bytes()).hexdigest()
+        if actual != expected:
+            problems.append(f"{rel}: approved executor file changed after independent review")
 
     problems.extend(_check_no_selected_identifiers())
     problems.extend(_check_executor_hardening())

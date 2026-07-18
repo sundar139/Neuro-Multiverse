@@ -83,6 +83,7 @@ The ds000030 pilot executor (`scripts/acquire_ds000030_pilot.py`) is a network-f
 - **Dry-run is a gate.** The default `--dry-run` performs zero provider body requests, prints only aggregate identifier-free output, and exits nonzero on any precondition failure.
 - **Approval preflight is body-free.** `--validate-execution` is the mandatory final approval preflight. It runs the same approval, exact-code, storage, runtime, permission, manifest, lock-availability, metadata-resolution, and origin gates as execution; resolves all 22 objects through metadata; and opens zero object bodies. It neither acquires the production lock nor creates events, partials, or manifest entries. Ordinary dry-run refuses supplied approval or storage evidence instead of validating it incompletely.
 - **Metadata redirects and file creation are closed.** GraphQL redirects must remain at the exact HTTPS metadata endpoint. Event logs and manifest temporary files are created at mode 600, and manifest replacement is followed by a parent-directory `fsync` where supported.
+- **Bounded authorization.** Independent approval `nm-ds000030-pilot-20260718-chatgpt-audit-001` covers only ds000030 snapshot 1.0.0, scope `ds000030_pilot_5_subjects`, the reviewed 22-file/187570603-byte plan, and its committed storage evidence. It does not authorize ABIDE, COBRE, or the approximately 20-subject expansion. The external record must match exact `HEAD`; any later commit invalidates it. `--validate-execution` must pass after record creation, and no transfer occurred during authorization.
 
 ---
 
