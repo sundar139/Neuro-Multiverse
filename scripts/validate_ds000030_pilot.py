@@ -15,6 +15,7 @@ import shutil
 import stat
 import subprocess
 from collections import Counter
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import median
@@ -31,6 +32,29 @@ EXPECTED_RECEIPT = (
 )
 TR_TOLERANCE = 1e-4
 MAX_JSON_BYTES = 1_000_000
+MAX_JSON_DEPTH = 20
+MAX_JSON_KEY_LENGTH = 256
+MAX_JSON_STRING_LENGTH = 100_000
+VALIDATOR_IMAGE = (
+    "bids/validator@sha256:8ef7bf22a5e62430c98c0f3e62627f400c62e85c20db3f691e370ddfdc9963c7"
+)
+VALIDATOR_VERSION = "3.0.0"
+VALIDATOR_SCHEMA = "1.2.4"
+VALIDATOR_ARCHITECTURE = "amd64"
+DOCKER_COMMAND_POLICY_VERSION = "1"
+WARNING_CLASSIFICATIONS = {
+    "JSON_KEY_RECOMMENDED": "nonblocking recommendation",
+    "SIDECAR_KEY_RECOMMENDED": "nonblocking recommendation",
+    "README_FILE_MISSING": "expected bounded-subset warning",
+}
+PROHIBITED_METADATA_KEYS = {
+    "patientname",
+    "patientid",
+    "patientbirthdate",
+    "patientaddress",
+    "medicalrecordnumber",
+    "participantid",
+}
 SUBJECT_RE = re.compile(r"^sub-([A-Za-z0-9]+)$")
 SECRET_RE = re.compile(
     r"X-Amz-|credential|authorization|password|cookie|token|signature",
@@ -93,9 +117,35 @@ def _strict_json(path: Path) -> dict[str, Any]:
         raise ValidationError("metadata JSON is malformed") from exc
     if not isinstance(value, dict):
         raise ValidationError("metadata JSON root is not an object")
+
+    def inspect(decoded: Any, depth: int = 0) -> None:
+        if depth > MAX_JSON_DEPTH:
+            raise ValidationError("metadata JSON nesting is excessive")
+        if isinstance(decoded, dict):
+            for key, item in decoded.items():
+                if len(key) > MAX_JSON_KEY_LENGTH:
+                    raise ValidationError("metadata JSON key is excessively long")
+                if key.casefold() in PROHIBITED_METADATA_KEYS:
+                    raise ValidationError("metadata JSON contains a prohibited participant field")
+                inspect(key, depth + 1)
+                inspect(item, depth + 1)
+        elif isinstance(decoded, list):
+            for item in decoded:
+                inspect(item, depth + 1)
+        elif isinstance(decoded, str):
+            if len(decoded) > MAX_JSON_STRING_LENGTH:
+                raise ValidationError("metadata JSON string is excessively long")
+            if any(
+                ord(char) == 0
+                or (ord(char) < 0x20 and char not in "\t\r\n")
+                or ord(char) == 0x7F
+                or 0xD800 <= ord(char) <= 0xDFFF
+                for char in decoded
+            ):
+                raise ValidationError("metadata JSON contains a prohibited character")
+
+    inspect(value)
     serialized = json.dumps(value, ensure_ascii=False)
-    if any(ord(char) < 0x20 and char not in "\t\r\n" for char in serialized):
-        raise ValidationError("metadata JSON contains a control character")
     if SECRET_RE.search(serialized) or PRIVATE_PATH_RE.search(serialized):
         raise ValidationError("metadata JSON contains prohibited secret or path material")
     return value
@@ -122,6 +172,38 @@ def _mode_private(path: Path) -> bool:
     return stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def _require_owner(path: Path) -> None:
+    geteuid = getattr(os, "geteuid", None)
+    if os.name != "nt" and geteuid is not None and path.stat().st_uid != geteuid():
+        raise ValidationError("external path owner is not the current user")
+
+
+def _require_private_directory(path: Path) -> None:
+    if path.is_symlink() or not path.is_dir():
+        raise ValidationError("private directory is missing or symbolic")
+    _require_owner(path)
+    if os.name != "nt" and stat.S_IMODE(path.stat().st_mode) != 0o700:
+        raise ValidationError("private directory mode is not 700")
+
+
+def _require_private_evidence_file(path: Path) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise ValidationError("external evidence is missing or symbolic")
+    _require_owner(path)
+    if not _mode_private(path):
+        raise ValidationError("external evidence mode is not 600")
+
+
+def _validate_private_tree(raw_root: Path) -> None:
+    _require_private_directory(raw_root)
+    for directory in raw_root.iterdir():
+        if directory.is_dir():
+            _require_private_directory(directory)
+            for child in directory.iterdir():
+                if child.is_dir():
+                    _require_private_directory(child)
+
+
 def _snapshot(raw_root: Path, manifest: dict[str, str]) -> dict[str, dict[str, Any]]:
     actual = {
         path.relative_to(raw_root).as_posix(): path
@@ -146,8 +228,9 @@ def _snapshot(raw_root: Path, manifest: dict[str, str]) -> dict[str, dict[str, A
         digest = _sha256(path)
         if digest != manifest[relative] or info.st_size <= 0:
             raise ValidationError("raw file hash or size differs from the manifest")
-        if os.name != "nt" and info.st_mode & 0o077:
-            raise ValidationError("raw file permissions are not private")
+        _require_owner(path)
+        if os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o600:
+            raise ValidationError("raw file mode is not 600")
         result[relative] = {
             "size": info.st_size,
             "sha256": digest,
@@ -217,6 +300,11 @@ def _validate_metadata(raw_root: Path, structure: dict[str, Any]) -> dict[str, A
             raise ValidationError("dataset description lacks a required string")
     if str(description.get("DatasetType", "raw")).lower() == "derivative":
         raise ValidationError("dataset is presented as a derivative")
+    if "License" in description and str(description["License"]).casefold() not in {
+        "cc0",
+        "cc0-1.0",
+    }:
+        raise ValidationError("dataset license differs from the verified record")
     root_bold = _strict_json(raw_root / "task-rest_bold.json")
     root_tr = root_bold.get("RepetitionTime")
     if root_tr is not None and not _positive_finite(root_tr):
@@ -224,20 +312,21 @@ def _validate_metadata(raw_root: Path, structure: dict[str, Any]) -> dict[str, A
     if "TaskName" in root_bold and "rest" not in str(root_bold["TaskName"]).lower():
         raise ValidationError("root task metadata is not resting state")
     parsed = 2
+    effective_trs: list[float] = []
     for item in structure["subjects"]:
         t1 = _strict_json(item["t1_sidecar"])
         direct = _strict_json(item["bold_sidecar"])
         parsed += 2
-        for key in set(root_bold) & set(direct):
-            if root_bold[key] != direct[key]:
-                raise ValidationError("inherited and direct BOLD metadata conflict")
         effective = {**root_bold, **direct}
         tr = effective.get("RepetitionTime")
         if not _positive_finite(tr):
             raise ValidationError("effective repetition time is invalid")
+        effective_trs.append(float(cast(float, tr)))
         item["t1_metadata"] = t1
         item["bold_metadata"] = direct
         item["effective_bold_metadata"] = effective
+    if max(effective_trs) - min(effective_trs) > TR_TOLERANCE:
+        raise ValidationError("effective repetition times differ across the controlled pilot")
     return {
         "json_files_parsed": parsed,
         "bids_version": description["BIDSVersion"],
@@ -272,7 +361,8 @@ def _validate_header(path: Path, expected_dims: int) -> dict[str, Any]:
         raise ValidationError("NIfTI voxel spacing is invalid")
     if not np.isfinite(affine).all():
         raise ValidationError("NIfTI affine is nonfinite")
-    if nib.orientations.aff2axcodes(affine) is None:  # type: ignore[no-untyped-call]
+    orientation = nib.orientations.aff2axcodes(affine)  # type: ignore[no-untyped-call]
+    if any(code is None for code in orientation):
         raise ValidationError("NIfTI orientation is unavailable")
     datatype = header.get_data_dtype()  # type: ignore[no-untyped-call]
     if datatype.itemsize <= 0 or datatype.kind not in "iuIfF":
@@ -291,7 +381,7 @@ def _validate_header(path: Path, expected_dims: int) -> dict[str, Any]:
         "sform_code": int(scode),
         "qform_present": qform is not None,
         "sform_present": sform is not None,
-        "orientation": nib.orientations.aff2axcodes(affine),  # type: ignore[no-untyped-call]
+        "orientation": orientation,
         "datatype": str(datatype),
         "free_text_present": any(
             bytes(header[field]).strip(b"\x00 ") for field in ("descrip", "aux_file", "intent_name")
@@ -305,9 +395,11 @@ def _validate_headers(structure: dict[str, Any]) -> dict[str, Any]:
     tr_matches = 0
     slice_checks = 0
     gzip_count = 0
+    free_text_count = 0
     for item in structure["subjects"]:
         t1 = _validate_header(item["t1_image"], 3)
         bold = _validate_header(item["bold_image"], 4)
+        free_text_count += int(t1["free_text_present"]) + int(bold["free_text_present"])
         effective = item["effective_bold_metadata"]
         tr = float(effective["RepetitionTime"])
         if abs(bold["zooms"][3] - tr) > TR_TOLERANCE:
@@ -352,6 +444,7 @@ def _validate_headers(structure: dict[str, Any]) -> dict[str, Any]:
         "header_json_tr_consistency_count": tr_matches,
         "slice_timing_consistency_count": slice_checks,
         "slice_timing_present_count": slice_checks,
+        "header_free_text_count": free_text_count,
         "raw_volume_count": _stats(volumes),
         "raw_duration_seconds": _stats(durations),
         "at_least_120_original_volumes": sum(value >= 120 for value in volumes),
@@ -363,83 +456,181 @@ def _stats(values: list[int] | list[float]) -> dict[str, float]:
     return {"minimum": min(values), "median": median(values), "maximum": max(values)}
 
 
+CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+def _docker_policy_args(raw_root: Path) -> list[str]:
+    uid = getattr(os, "geteuid", lambda: 0)()
+    gid = getattr(os, "getegid", lambda: 0)()
+    return [
+        "run",
+        "--rm",
+        "--network=none",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--user",
+        f"{uid}:{gid}",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=64m",  # noqa: S108 - container-only tmpfs
+        "--mount",
+        f"type=bind,src={raw_root},dst=/data,readonly",
+    ]
+
+
+def _run_captured(
+    runner: CommandRunner, command: Sequence[str], *, check: bool = False
+) -> subprocess.CompletedProcess[str]:
+    return runner(list(command), text=True, capture_output=True, check=check)
+
+
+def _inspect_validator_image(docker: Path, image: str, runner: CommandRunner) -> dict[str, Any]:
+    if image != VALIDATOR_IMAGE or "@sha256:" not in image or image.endswith(":latest"):
+        raise ValidationError("validator image is not the exact pinned digest")
+    _run_captured(runner, [str(docker), "info"], check=True)
+    result = _run_captured(runner, [str(docker), "image", "inspect", image], check=True)
+    try:
+        inspected = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValidationError("Docker image inspection is malformed") from exc
+    if not isinstance(inspected, list) or len(inspected) != 1 or not isinstance(inspected[0], dict):
+        raise ValidationError("Docker image inspection is malformed")
+    details = inspected[0]
+    digests = details.get("RepoDigests")
+    if not isinstance(digests, list) or VALIDATOR_IMAGE not in digests:
+        raise ValidationError("local validator image digest does not match")
+    if details.get("Architecture") != VALIDATOR_ARCHITECTURE:
+        raise ValidationError("validator image architecture is unsupported")
+    return details
+
+
+def _parse_validator_result(stdout: str, returncode: int) -> dict[str, Any]:
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise ValidationError("BIDS Validator output is not JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValidationError("BIDS Validator output root is not an object")
+    if any(key in payload for key in ("derivatives", "derivativeSummary", "derivativesSummary")):
+        raise ValidationError("BIDS Validator output contains a derivative summary")
+    issue_container = payload.get("issues")
+    if not isinstance(issue_container, dict):
+        raise ValidationError("BIDS Validator issues structure is malformed")
+    issues = issue_container.get("issues")
+    if not isinstance(issues, list):
+        raise ValidationError("BIDS Validator issue list is missing")
+    severity: Counter[str] = Counter()
+    codes: Counter[str] = Counter()
+    for issue in issues:
+        if not isinstance(issue, dict):
+            raise ValidationError("BIDS Validator issue is malformed")
+        level = issue.get("severity")
+        code = issue.get("code")
+        if level not in {"error", "warning", "ignore"}:
+            raise ValidationError("BIDS Validator issue severity is malformed")
+        if not isinstance(code, str) or not code.strip():
+            raise ValidationError("BIDS Validator issue code is malformed")
+        severity[level] += 1
+        codes[code] += 1
+    summary = payload.get("summary")
+    if not isinstance(summary, dict):
+        raise ValidationError("BIDS Validator summary is missing")
+    total_files = summary.get("totalFiles")
+    schema = summary.get("schemaVersion")
+    if isinstance(total_files, bool) or not isinstance(total_files, int):
+        raise ValidationError("BIDS Validator file count is malformed")
+    if total_files != EXPECTED_FILES:
+        raise ValidationError("BIDS Validator file count is not 22")
+    if not isinstance(schema, str) or schema != VALIDATOR_SCHEMA:
+        raise ValidationError("BIDS Validator schema version differs from the pinned version")
+    if summary.get("subjectMetadata") not in (None, {}, []):
+        raise ValidationError("BIDS Validator exposed subject metadata")
+    for container in (issue_container, summary):
+        for key, level in (
+            ("errorCount", "error"),
+            ("warningCount", "warning"),
+            ("ignoredCount", "ignore"),
+        ):
+            if key in container and container[key] != severity[level]:
+                raise ValidationError("BIDS Validator aggregate issue counts differ")
+    warning_codes = {issue["code"] for issue in issues if issue["severity"] == "warning"}
+    unknown = sorted(warning_codes - WARNING_CLASSIFICATIONS.keys())
+    if unknown:
+        raise ValidationError("BIDS Validator reported an unclassified warning")
+    if returncode != 0 or severity["error"]:
+        raise ValidationError("BIDS Validator reported errors")
+    if severity["ignore"]:
+        raise ValidationError("BIDS Validator reported ignored issues")
+    return {
+        "schema_version": schema,
+        "error_count": severity["error"],
+        "warning_count": severity["warning"],
+        "ignored_count": severity["ignore"],
+        "issue_code_counts": dict(sorted(codes.items())),
+        "warning_classifications": {
+            code: WARNING_CLASSIFICATIONS[code] for code in sorted(warning_codes)
+        },
+        "files_examined": total_files,
+    }
+
+
 def _run_validator(
-    executable: Path, raw_root: Path, output_path: Path, expected: str | None
+    docker: Path,
+    image: str,
+    raw_root: Path,
+    output_path: Path,
+    runner: CommandRunner = subprocess.run,
 ) -> dict[str, Any]:
-    version_result = subprocess.run(
-        [str(executable), "--version"], text=True, capture_output=True, check=True
-    )
-    version_match = re.search(r"\d+\.\d+\.\d+", version_result.stdout)
-    if not version_match:
-        raise ValidationError("BIDS Validator version is unavailable")
-    version = version_match.group(0)
-    if expected is not None and version != expected:
+    _inspect_validator_image(docker, image, runner)
+    policy = _docker_policy_args(raw_root)
+    version_result = _run_captured(runner, [str(docker), *policy, image, "--version"])
+    version = version_result.stdout.strip()
+    if version_result.returncode != 0 or version != VALIDATOR_VERSION:
         raise ValidationError("BIDS Validator version differs from the pinned version")
     started = _utc_now()
-    result = subprocess.run(
-        [str(executable), str(raw_root), "--format", "json"],
-        text=True,
-        capture_output=True,
-    )
+    result = _run_captured(runner, [str(docker), *policy, image, "/data", "--format", "json"])
     completed = _utc_now()
     fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
         stream.write(result.stdout)
         stream.flush()
         os.fsync(stream.fileno())
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise ValidationError("BIDS Validator output is not JSON") from exc
-    issue_container = payload.get("issues", {})
-    issues = issue_container.get("issues", []) if isinstance(issue_container, dict) else []
-    severity = Counter(str(issue.get("severity", "")) for issue in issues)
-    codes = Counter(str(issue.get("code", "UNKNOWN")) for issue in issues)
-    errors = severity["error"]
-    warnings = severity["warning"]
-    ignored = severity["ignore"]
-    classifications = {
-        code: (
-            "expected bounded-subset warning"
-            if code == "README_FILE_MISSING"
-            else "nonblocking recommendation"
-        )
-        for code in codes
-    }
-    if result.returncode != 0 or errors:
-        raise ValidationError("BIDS Validator reported errors")
-    summary = payload.get("summary", {})
+    parsed = _parse_validator_result(result.stdout, result.returncode)
     return {
         "name": "BIDS Validator",
         "version": version,
-        "schema_version": summary.get("schemaVersion"),
+        "container_image": image,
+        "docker_command_policy_version": DOCKER_COMMAND_POLICY_VERSION,
         "started_at_utc": started,
         "completed_at_utc": completed,
         "exit_code": result.returncode,
-        "error_count": errors,
-        "warning_count": warnings,
-        "ignored_count": ignored,
-        "issue_code_counts": dict(sorted(codes.items())),
-        "warning_classifications": classifications,
-        "files_examined": summary.get("totalFiles"),
         "output_sha256": _sha256(output_path),
         "nifti_headers_parsed": True,
+        **parsed,
     }
 
 
-def validate(args: argparse.Namespace) -> dict[str, Any]:
+def _require_runtime() -> None:
     if platform.system() != "Linux" or "microsoft" not in platform.release().lower():
         raise ValidationError("validation requires WSL2 Linux")
     if "24.04" not in Path("/etc/os-release").read_text():
         raise ValidationError("validation requires Ubuntu 24.04")
+
+
+def validate(args: argparse.Namespace, runner: CommandRunner = subprocess.run) -> dict[str, Any]:
+    _require_runtime()
+    if args.raw_root.is_symlink():
+        raise ValidationError("raw root is a symbolic link")
     raw_root = args.raw_root.resolve(strict=True)
     repository = Path(__file__).resolve().parents[1]
     if repository == raw_root or repository in raw_root.parents or raw_root in repository.parents:
         raise ValidationError("raw root must be outside Git")
     if args.output.resolve().is_relative_to(raw_root):
         raise ValidationError("validation output must be outside the raw tree")
-    if not _mode_private(args.manifest) or not _mode_private(args.acquisition_receipt):
-        raise ValidationError("external evidence mode is not 600")
+    _require_private_directory(args.output.parent)
+    _require_private_evidence_file(args.manifest)
+    _require_private_evidence_file(args.acquisition_receipt)
+    _validate_private_tree(raw_root)
     receipt = _strict_json(args.acquisition_receipt)
     if (
         receipt.get("scope") != "ds000030_pilot_5_subjects"
@@ -459,10 +650,11 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
     metadata = _validate_metadata(raw_root, structure)
     validator_output = args.output.with_suffix(".validator.json")
     validator = _run_validator(
-        args.bids_validator,
+        args.docker_executable.resolve(strict=True),
+        args.validator_image,
         raw_root,
         validator_output,
-        args.bids_validator_version,
+        runner,
     )
     headers = _validate_headers(structure)
     post = _snapshot(raw_root, manifest)
@@ -499,6 +691,7 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         "header_json_tr_consistency_count": headers["header_json_tr_consistency_count"],
         "slice_timing_consistency_count": headers["slice_timing_consistency_count"],
         "slice_timing_present_count": headers["slice_timing_present_count"],
+        "header_free_text_count": headers["header_free_text_count"],
         "raw_volume_count": headers["raw_volume_count"],
         "raw_duration_seconds": headers["raw_duration_seconds"],
         "at_least_120_original_volumes": headers["at_least_120_original_volumes"],
@@ -539,8 +732,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--manifest", type=Path, required=True)
     result.add_argument("--acquisition-receipt", type=Path, required=True)
     result.add_argument("--output", type=Path, required=True)
-    result.add_argument("--bids-validator", type=Path, required=True)
-    result.add_argument("--bids-validator-version")
+    result.add_argument("--docker-executable", type=Path, required=True)
+    result.add_argument("--validator-image", default=VALIDATOR_IMAGE)
     return result
 
 
@@ -557,7 +750,12 @@ def main() -> int:
             "voxel_arrays_loaded": 0,
             "raw_files_modified": 0,
         }
-        if not args.output.exists():
+        output_parent_private = True
+        try:
+            _require_private_directory(args.output.parent)
+        except ValidationError:
+            output_parent_private = False
+        if output_parent_private and not args.output.exists():
             fd = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 stream.write(json.dumps(failure, indent=2, sort_keys=True) + "\n")

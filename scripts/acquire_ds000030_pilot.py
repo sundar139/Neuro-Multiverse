@@ -33,6 +33,7 @@ import json
 import os
 import shutil
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -494,7 +495,7 @@ def read_manifest(
 
 def write_manifest(manifest_path: Path, entries: dict[str, str]) -> None:
     """Write a canonical, sorted manifest atomically (temp, fsync, replace, 0600)."""
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_private_directory(manifest_path.parent)
     lines = [f"{entries[rel]}  {rel}\n" for rel in sorted(entries)]
     tmp = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -576,7 +577,7 @@ def _reject_forbidden(obj: Any) -> None:
 def append_event(log_dir: Path, event: dict[str, Any]) -> None:
     """Append one JSONL event (no URL, no credential). File mode 600 on POSIX."""
     _reject_forbidden(event)
-    log_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_private_directory(log_dir)
     path = log_dir / "acquisition-events.jsonl"
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     if hasattr(os, "getuid") and (os.fstat(fd).st_mode & 0o777) != 0o600:
@@ -934,6 +935,12 @@ def validate_execution_preconditions(
     modes_verified = all(mode_is_600(path) is True for path in mode_targets)
     if not modes_verified:
         problems.append("an execution-critical file lacks verifiable mode 600")
+    for directory in (target_root, log_dir):
+        if directory.exists():
+            try:
+                _require_private_directory(directory)
+            except PermissionError:
+                problems.append("an execution-critical directory lacks mode 700")
 
     allowed = frozenset(entry.local_relative_target for entry in plan_model.files)
     try:
@@ -1016,7 +1023,7 @@ class ExecutionLock:
         self._acquired = False
 
     def acquire(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_private_directory(self.path.parent)
         try:
             self._create()
         except FileExistsError:
@@ -1042,6 +1049,43 @@ class ExecutionLock:
 
 
 # --- Download + promotion (failure-safe) ------------------------------------
+def _require_private_directory(path: Path) -> None:
+    """Require an existing, owned, nonsymlink POSIX directory at mode 700."""
+    if path.is_symlink() or not path.is_dir():
+        raise PermissionError("private path is not a regular directory")
+    info = path.stat()
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise PermissionError("private directory owner mismatch")
+    if hasattr(os, "getuid") and stat.S_IMODE(info.st_mode) != 0o700:
+        raise PermissionError("private directory mode is not 700")
+
+
+def _ensure_private_directory(path: Path) -> None:
+    """Create one private directory at mode 700, or validate the existing one."""
+    if not path.exists():
+        path.mkdir(mode=0o700)
+    _require_private_directory(path)
+
+
+def _ensure_private_target_parents(root: Path, parent: Path) -> None:
+    """Create participant-bearing descendants privately beneath a validated root."""
+    root = root.resolve(strict=True)
+    _require_private_directory(root)
+    relative = parent.resolve(strict=False).relative_to(root)
+    current = root
+    for component in relative.parts:
+        current = current / component
+        _ensure_private_directory(current)
+
+
+def _require_private_file(path: Path) -> None:
+    """Require a regular nonsymlink file at mode 600."""
+    if path.is_symlink() or not path.is_file():
+        raise PermissionError("private file is not regular")
+    if hasattr(os, "getuid") and stat.S_IMODE(path.stat().st_mode) != 0o600:
+        raise PermissionError("private file mode is not 600")
+
+
 def _stream_download(url: str, partial: Path, expected_size: int, entry: PilotFileEntry) -> str:
     """Stream to ``partial``, hash (local + provider), verify size, fsync.
 
@@ -1049,24 +1093,27 @@ def _stream_download(url: str, partial: Path, expected_size: int, entry: PilotFi
     leaving no promoted file. No URL appears in any raised message.
     """
     validate_url(url, _OBJECT_ORIGINS)
-    partial.parent.mkdir(parents=True, exist_ok=True)
+    _require_private_directory(partial.parent)
     local = hashlib.sha256()
     provider = None
     if entry.provider_checksum_suitable_for_content_integrity and entry.provider_checksum_algorithm:
         provider = hashlib.new(entry.provider_checksum_algorithm)
     written = 0
-    opener = urllib.request.build_opener(SafeRedirectHandler())
     req = urllib.request.Request(url)  # noqa: S310 - validated https object URL
-    with opener.open(req, timeout=120) as resp, partial.open("wb") as fh:
-        for chunk in iter(lambda: resp.read(_CHUNK), b""):
-            fh.write(chunk)
-            local.update(chunk)
-            if provider is not None:
-                provider.update(chunk)
-            written += len(chunk)
-        fh.flush()
-        if hasattr(os, "fsync"):
-            os.fsync(fh.fileno())
+    fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        opener = urllib.request.build_opener(SafeRedirectHandler())
+        with opener.open(req, timeout=120) as resp:
+            for chunk in iter(lambda: resp.read(_CHUNK), b""):
+                fh.write(chunk)
+                local.update(chunk)
+                if provider is not None:
+                    provider.update(chunk)
+                written += len(chunk)
+            fh.flush()
+            if hasattr(os, "fsync"):
+                os.fsync(fh.fileno())
+    _require_private_file(partial)
     if written != expected_size:
         raise RuntimeError("byte-count mismatch during download")
     if (
@@ -1094,6 +1141,8 @@ def _download_one(
         raise ValueError("resolved target escapes the data root")
     partial = target.with_suffix(target.suffix + ".partial")
 
+    _ensure_private_target_parents(resolved_root, target.parent)
+
     digest = _stream_download(url, partial, entry.provider_size_bytes, entry)
     # Promote only after the partial is fully verified; never overwrite an
     # existing (unverified) final file.
@@ -1101,6 +1150,10 @@ def _download_one(
         partial.unlink(missing_ok=True)
         raise RuntimeError("refusing to overwrite an existing final file")
     partial.replace(target)
+    _require_private_file(target)
+    _require_private_directory(target.parent)
+    if resolved_root not in target.resolve(strict=True).parents:
+        raise RuntimeError("promoted file escapes the approved target")
     try:
         add_manifest_entry(manifest_path, rel, digest, allowed)
         recheck = read_manifest(manifest_path, allowed)
@@ -1112,6 +1165,8 @@ def _download_one(
         quarantine = target.with_suffix(target.suffix + f".unrecorded.{os.getpid()}")
         try:
             target.replace(quarantine)
+            _require_private_file(quarantine)
+            _require_private_directory(quarantine.parent)
         except OSError:
             target.unlink(missing_ok=True)
         raise
@@ -1140,6 +1195,7 @@ def _run_execution(
     manifest_path: Path,
     lock_path: Path,
 ) -> int:
+    _ensure_private_directory(target_root)
     resolved_root = target_root.resolve()
     allowed = frozenset(f.local_relative_target for f in plan_model.files)
     context = _event_context(plan_model, approval)
@@ -1195,6 +1251,10 @@ def _run_execution(
             )
             try:
                 _download_one(entry, url, resolved_root, manifest_path, allowed, log_dir, context)
+            except FileExistsError:
+                # An existing partial may belong to another or interrupted run.
+                # Refuse it without truncating, overwriting, or deleting it.
+                raise
             except Exception:
                 _cleanup_partial(resolved_root, rel)
                 raise

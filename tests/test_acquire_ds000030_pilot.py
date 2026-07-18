@@ -14,6 +14,7 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -825,8 +826,11 @@ def _storage_ready(monkeypatch: pytest.MonkeyPatch, data: dict[str, Any]) -> Non
 
 
 def _raw_target(storage_root: Path) -> Path:
-    target = storage_root / "ds000030" / "raw"
-    target.mkdir(parents=True)
+    dataset = storage_root / "ds000030"
+    if not dataset.exists():
+        dataset.mkdir(mode=0o700)
+    target = dataset / "raw"
+    target.mkdir(mode=0o700)
     return target
 
 
@@ -1275,6 +1279,88 @@ def test_stream_download_verifies_size(tmp_path: Path, monkeypatch: pytest.Monke
     partial = tmp_path / "out.partial"
     digest = tool._stream_download(url, partial, 3, entry)
     assert digest == hashlib.sha256(b"abc").hexdigest()
+    if os.name != "nt":
+        assert stat.S_IMODE(partial.stat().st_mode) == 0o600
+
+
+def test_existing_partial_is_not_truncated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.request
+
+    url = "https://s3.amazonaws.com/openneuro.org/x"
+    opened = False
+
+    def forbidden_open(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal opened
+        opened = True
+        raise AssertionError("network opened")
+
+    monkeypatch.setattr(urllib.request, "build_opener", forbidden_open)
+    entry = PilotFileEntry.model_validate(
+        _entry(
+            "sub-SYNTHA",
+            "t1w_image",
+            "sub-SYNTHA/anat/sub-SYNTHA_T1w.nii.gz",
+            "sub-SYNTHA/anat/sub-SYNTHA_T1w.nii.gz",
+            "id",
+            3,
+        )
+    )
+    partial = tmp_path / "out.partial"
+    partial.write_bytes(b"old")
+    with pytest.raises(FileExistsError):
+        tool._stream_download(url, partial, 3, entry)
+    assert partial.read_bytes() == b"old"
+    assert not opened
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode enforcement")
+def test_private_directory_created_mode_700_under_umask(tmp_path: Path) -> None:
+    directory = tmp_path / "private"
+    previous = os.umask(0o022)
+    try:
+        tool._ensure_private_directory(directory)
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode enforcement")
+def test_wrong_mode_target_directory_blocks_before_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import urllib.request
+
+    target = tmp_path / "private"
+    target.mkdir(mode=0o755)
+    called = False
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal called
+        called = True
+        raise AssertionError("network opened")
+
+    monkeypatch.setattr(urllib.request, "build_opener", forbidden)
+    entry = PilotFileEntry.model_validate(
+        _entry(
+            "sub-SYNTHA",
+            "t1w_image",
+            "sub-SYNTHA/anat/sub-SYNTHA_T1w.nii.gz",
+            "sub-SYNTHA/anat/sub-SYNTHA_T1w.nii.gz",
+            "id",
+            3,
+        )
+    )
+    with pytest.raises(PermissionError):
+        tool._download_one(
+            entry,
+            "https://s3.amazonaws.com/openneuro.org/x",
+            target,
+            target / "checksums.sha256",
+            frozenset({entry.local_relative_target}),
+            tmp_path / "log",
+            {},
+        )
+    assert not called
 
 
 def test_provider_checksum_mismatch_prevents_promotion(
@@ -1348,7 +1434,7 @@ def test_malformed_manifest_releases_lock(tmp_path: Path, monkeypatch: pytest.Mo
     digest = _sync_constants(monkeypatch, plan_dict)
     approval = PilotApprovalRecord.model_validate(_approval(digest, plan_dict))
     root = tmp_path / "ds000030"
-    root.mkdir()
+    root.mkdir(mode=0o700)
     (root / "checksums.sha256").write_text("bad\n", encoding="utf-8")
     lock_path = tmp_path / "log" / "run.lock"
     rc = tool._run_execution(
@@ -1378,11 +1464,12 @@ def test_manifest_failure_after_promotion_quarantines(
         )
     )
     root = tmp_path / "ds000030"
-    root.mkdir()
+    root.mkdir(mode=0o700)
 
     def fake_stream(url: str, partial: Path, size: int, e: Any) -> str:
-        partial.parent.mkdir(parents=True, exist_ok=True)
-        partial.write_bytes(b"abc")
+        fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(b"abc")
         return hashlib.sha256(b"abc").hexdigest()
 
     monkeypatch.setattr(tool, "_stream_download", fake_stream)
@@ -1406,6 +1493,8 @@ def test_manifest_failure_after_promotion_quarantines(
     assert not final.exists()  # not left as a size-only final file
     quarantined = list(root.glob("**/*.unrecorded.*"))
     assert quarantined
+    if os.name != "nt":
+        assert stat.S_IMODE(quarantined[0].stat().st_mode) == 0o600
 
 
 # --- Events -----------------------------------------------------------------
@@ -1509,6 +1598,8 @@ def test_synthetic_execution_promotes_and_records(
     assert len(manifest) == 22
     for f in plan.files:
         assert (root / f.local_relative_target).stat().st_size == f.provider_size_bytes
+        if os.name != "nt":
+            assert stat.S_IMODE((root / f.local_relative_target).stat().st_mode) == 0o600
     events = (tmp_path / "acquisition-log" / "acquisition-events.jsonl").read_text(encoding="utf-8")
     assert "run_completed" in events
 

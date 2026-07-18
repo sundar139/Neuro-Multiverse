@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -46,15 +46,17 @@ def _nifti(path: Path, shape: tuple[int, ...], tr: float | None = None) -> None:
 
 def _dataset(tmp_path: Path, *, tr: float = 2.0) -> Path:
     root = tmp_path / "raw"
-    root.mkdir()
+    root.mkdir(mode=0o700)
     _json(root / "dataset_description.json", {"Name": "Synthetic", "BIDSVersion": "1.8.0"})
     _json(root / "task-rest_bold.json", {"TaskName": "rest", "RepetitionTime": tr})
     for index in range(5):
         subject = f"sub-syn{index + 1}"
         anat = root / subject / "anat"
         func = root / subject / "func"
-        anat.mkdir(parents=True)
-        func.mkdir(parents=True)
+        subject_dir = root / subject
+        subject_dir.mkdir(mode=0o700)
+        anat.mkdir(mode=0o700)
+        func.mkdir(mode=0o700)
         _nifti(anat / f"{subject}_T1w.nii.gz", (2, 2, 2))
         _json(anat / f"{subject}_T1w.json", {})
         _nifti(func / f"{subject}_task-rest_bold.nii.gz", (2, 2, 2, 120), tr)
@@ -92,6 +94,25 @@ def test_strict_json_rejects_duplicate_or_nonfinite(tmp_path: Path, invalid: str
         tool._strict_json(path)
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    ['{"value":"\\u0000"}', '{"value":"\\u0001"}', '{"PatientID":"private"}'],
+)
+def test_strict_json_rejects_decoded_controls_and_participant_fields(
+    tmp_path: Path, invalid: str
+) -> None:
+    path = tmp_path / "bad.json"
+    path.write_text(invalid, encoding="utf-8")
+    with pytest.raises(tool.ValidationError):
+        tool._strict_json(path)
+
+
+def test_strict_json_accepts_legitimate_scanner_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "scanner.json"
+    _json(path, {"Manufacturer": "Synthetic Scanner", "MagneticFieldStrength": 3})
+    assert tool._strict_json(path)["MagneticFieldStrength"] == 3
+
+
 def test_missing_bold_sidecar_fails(tmp_path: Path) -> None:
     root = _dataset(tmp_path)
     next(root.rglob("*_task-rest_bold.json")).unlink()
@@ -106,11 +127,22 @@ def test_orphan_sidecar_fails(tmp_path: Path) -> None:
         tool._validate_structure(root)
 
 
-def test_conflicting_inherited_repetition_time_fails(tmp_path: Path) -> None:
+def test_direct_override_is_accepted_but_heterogeneous_effective_tr_fails(tmp_path: Path) -> None:
     root = _dataset(tmp_path)
     _json(next(root.rglob("*_task-rest_bold.json")), {"RepetitionTime": 3.0})
-    with pytest.raises(tool.ValidationError, match="conflict"):
+    with pytest.raises(tool.ValidationError, match="controlled pilot"):
         tool._validate_metadata(root, tool._validate_structure(root))
+
+
+def test_uniform_direct_override_is_effective(tmp_path: Path) -> None:
+    root = _dataset(tmp_path)
+    for sidecar in root.rglob("*_task-rest_bold.json"):
+        _json(sidecar, {"RepetitionTime": 3.0})
+    structure = tool._validate_structure(root)
+    tool._validate_metadata(root, structure)
+    assert {
+        item["effective_bold_metadata"]["RepetitionTime"] for item in structure["subjects"]
+    } == {3.0}
 
 
 def test_nonpositive_repetition_time_fails(tmp_path: Path) -> None:
@@ -230,31 +262,137 @@ def _validator_result(errors: int = 0, warnings: int = 0) -> str:
     )
 
 
-def test_validator_error_makes_gate_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    results = iter(
-        [
-            subprocess.CompletedProcess([], 0, "bids-validator 3.0.0", ""),
-            subprocess.CompletedProcess([], 16, _validator_result(errors=1), ""),
-        ]
-    )
-    monkeypatch.setattr(tool.subprocess, "run", lambda *_args, **_kwargs: next(results))
+def _docker_runner(validator_output: str, returncode: int = 0) -> Any:
+    def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if command[-1] == "info":
+            return subprocess.CompletedProcess(command, 0, "ok", "")
+        if command[-3:-1] == ["image", "inspect"]:
+            inspected = [{"RepoDigests": [tool.VALIDATOR_IMAGE], "Architecture": "amd64"}]
+            return subprocess.CompletedProcess(command, 0, json.dumps(inspected), "")
+        if command[-1] == "--version":
+            return subprocess.CompletedProcess(command, 0, tool.VALIDATOR_VERSION, "")
+        return subprocess.CompletedProcess(command, returncode, validator_output, "")
+
+    return run
+
+
+def test_validator_error_makes_gate_fail(tmp_path: Path) -> None:
     with pytest.raises(tool.ValidationError, match="reported errors"):
-        tool._run_validator(Path("validator"), tmp_path, tmp_path / "output.json", "3.0.0")
+        tool._run_validator(
+            Path("docker"),
+            tool.VALIDATOR_IMAGE,
+            tmp_path,
+            tmp_path / "output.json",
+            _docker_runner(_validator_result(errors=1), 16),
+        )
 
 
-def test_validator_warning_is_retained_and_classified(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    results = iter(
-        [
-            subprocess.CompletedProcess([], 0, "bids-validator 3.0.0", ""),
-            subprocess.CompletedProcess([], 0, _validator_result(warnings=1), ""),
-        ]
+def test_validator_warning_is_retained_and_classified(tmp_path: Path) -> None:
+    result = tool._run_validator(
+        Path("docker"),
+        tool.VALIDATOR_IMAGE,
+        tmp_path,
+        tmp_path / "output.json",
+        _docker_runner(_validator_result(warnings=1)),
     )
-    monkeypatch.setattr(tool.subprocess, "run", lambda *_args, **_kwargs: next(results))
-    result = tool._run_validator(Path("validator"), tmp_path, tmp_path / "output.json", "3.0.0")
     assert result["warning_count"] == 1
     assert result["warning_classifications"]["README_FILE_MISSING"]
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"summary": {"schemaVersion": "1.2.4", "totalFiles": 22}}, "issues"),
+        ({"issues": [], "summary": {"schemaVersion": "1.2.4", "totalFiles": 22}}, "issues"),
+        ({"issues": {}, "summary": {"schemaVersion": "1.2.4", "totalFiles": 22}}, "issue list"),
+        (
+            {"issues": {"issues": [None]}, "summary": {"schemaVersion": "1.2.4", "totalFiles": 22}},
+            "issue",
+        ),
+        ({"issues": {"issues": []}}, "summary"),
+        (
+            {"issues": {"issues": []}, "summary": {"schemaVersion": "1.2.4", "totalFiles": 21}},
+            "file count",
+        ),
+        (
+            {"issues": {"issues": []}, "summary": {"schemaVersion": "1.2.3", "totalFiles": 22}},
+            "schema",
+        ),
+        (
+            {
+                "issues": {"issues": [{"severity": "ignore", "code": "X"}]},
+                "summary": {"schemaVersion": "1.2.4", "totalFiles": 22},
+            },
+            "ignored",
+        ),
+        (
+            {
+                "issues": {"issues": [{"severity": "warning", "code": "UNKNOWN"}]},
+                "summary": {"schemaVersion": "1.2.4", "totalFiles": 22},
+            },
+            "unclassified",
+        ),
+        (
+            {
+                "issues": {"issues": [], "warningCount": 1},
+                "summary": {"schemaVersion": "1.2.4", "totalFiles": 22},
+            },
+            "aggregate issue counts",
+        ),
+    ],
+)
+def test_validator_output_fails_closed(payload: dict[str, Any], message: str) -> None:
+    with pytest.raises(tool.ValidationError, match=message):
+        tool._parse_validator_result(json.dumps(payload), 0)
+
+
+def test_docker_policy_is_offline_read_only_and_minimally_mounted(tmp_path: Path) -> None:
+    command = tool._docker_policy_args(tmp_path)
+    joined = " ".join(command)
+    assert "--network=none" in command
+    assert "--read-only" in command
+    assert "--cap-drop=ALL" in command
+    assert "--security-opt=no-new-privileges" in command
+    assert "dst=/data,readonly" in joined
+    assert command.count("--mount") == 1
+    assert f"src={tmp_path}" in joined
+    assert "--config" not in command and "--ignoreNiftiHeaders" not in command
+
+
+@pytest.mark.parametrize(
+    "image", ["bids/validator:3.0.0", "bids/validator:latest", "bids/validator@sha256:" + "0" * 64]
+)
+def test_mutable_or_wrong_validator_image_is_rejected(tmp_path: Path, image: str) -> None:
+    with pytest.raises(tool.ValidationError, match="pinned digest"):
+        tool._inspect_validator_image(Path("docker"), image, _docker_runner(_validator_result()))
+
+
+def test_missing_local_validator_image_is_rejected() -> None:
+    def missing(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if command[-1] == "info":
+            return subprocess.CompletedProcess(command, 0, "ok", "")
+        raise subprocess.CalledProcessError(1, command)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        tool._inspect_validator_image(Path("docker"), tool.VALIDATOR_IMAGE, missing)
+
+
+def test_validator_version_mismatch_is_rejected(tmp_path: Path) -> None:
+    base = _docker_runner(_validator_result())
+
+    def wrong_version(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if command[-1] == "--version":
+            return subprocess.CompletedProcess(command, 0, "3.0.1", "")
+        return cast(subprocess.CompletedProcess[str], base(command, **kwargs))
+
+    with pytest.raises(tool.ValidationError, match="version differs"):
+        tool._run_validator(
+            Path("docker"),
+            tool.VALIDATOR_IMAGE,
+            tmp_path,
+            tmp_path / "output.json",
+            wrong_version,
+        )
 
 
 def test_subject_token_does_not_disclose_subject() -> None:
@@ -264,17 +402,16 @@ def test_subject_token_does_not_disclose_subject() -> None:
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode enforcement")
 def test_validator_output_is_created_mode_600(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    results = iter(
-        [
-            subprocess.CompletedProcess([], 0, "bids-validator 3.0.0", ""),
-            subprocess.CompletedProcess([], 0, _validator_result(), ""),
-        ]
-    )
-    monkeypatch.setattr(tool.subprocess, "run", lambda *_args, **_kwargs: next(results))
     output = tmp_path / "validator.json"
-    tool._run_validator(Path("validator"), tmp_path, output, "3.0.0")
+    tool._run_validator(
+        Path("docker"),
+        tool.VALIDATOR_IMAGE,
+        tmp_path,
+        output,
+        _docker_runner(_validator_result()),
+    )
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
 
 
@@ -289,3 +426,79 @@ def test_snapshot_detects_file_change(tmp_path: Path) -> None:
     assert before
     with pytest.raises(tool.ValidationError, match="hash or size"):
         tool._snapshot(root, manifest)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode enforcement")
+def test_wrong_raw_mode_blocks_before_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _dataset(tmp_path)
+    next(root.rglob("*.json")).chmod(0o644)
+    monkeypatch.setattr(tool, "_require_runtime", lambda: None)
+    called = False
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal called
+        called = True
+        raise AssertionError("Docker invoked")
+
+    manifest = {
+        path.relative_to(root).as_posix(): tool._sha256(path)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    with pytest.raises(tool.ValidationError, match="mode is not 600"):
+        tool._snapshot(root, manifest)
+    assert not called
+
+
+def test_synthetic_end_to_end_validate_is_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _dataset(tmp_path)
+    files = sorted(path for path in root.rglob("*") if path.is_file())
+    manifest_path = tmp_path / "checksums.sha256"
+    manifest_path.write_text(
+        "".join(f"{tool._sha256(path)}  {path.relative_to(root).as_posix()}\n" for path in files),
+        encoding="utf-8",
+    )
+    receipt = {
+        "scope": "ds000030_pilot_5_subjects",
+        "actual_final_file_count": len(files),
+        "actual_total_bytes": sum(path.stat().st_size for path in files),
+    }
+    receipt_path = tmp_path / "receipt.json"
+    _json(receipt_path, receipt)
+    output_dir = tmp_path / "reports"
+    output_dir.mkdir(mode=0o700)
+    docker = tmp_path / "docker"
+    docker.write_text("synthetic", encoding="utf-8")
+    if os.name != "nt":
+        manifest_path.chmod(0o600)
+        docker.chmod(0o700)
+    else:
+        monkeypatch.setattr(tool, "_mode_private", lambda _path: True)
+    monkeypatch.setattr(tool, "_require_runtime", lambda: None)
+    monkeypatch.setattr(tool, "EXPECTED_FILES", len(files))
+    monkeypatch.setattr(tool, "EXPECTED_BYTES", receipt["actual_total_bytes"])
+    monkeypatch.setattr(
+        tool,
+        "EXPECTED_RECEIPT",
+        f"ds000030-pilot-acquisition-sha256:{tool._canonical_digest(receipt)}",
+    )
+    before = {path: (tool._sha256(path), path.stat().st_mtime_ns) for path in files}
+    args = SimpleNamespace(
+        raw_root=root,
+        manifest=manifest_path,
+        acquisition_receipt=receipt_path,
+        output=output_dir / "report.json",
+        docker_executable=docker,
+        validator_image=tool.VALIDATOR_IMAGE,
+    )
+    summary = tool.validate(args, _docker_runner(_validator_result()))
+    after = {path: (tool._sha256(path), path.stat().st_mtime_ns) for path in files}
+    assert summary["validation_passed"] is True
+    assert summary["voxel_arrays_loaded"] == 0
+    assert before == after
+    if os.name != "nt":
+        assert stat.S_IMODE(args.output.stat().st_mode) == 0o600

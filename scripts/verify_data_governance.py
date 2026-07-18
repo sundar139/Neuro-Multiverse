@@ -31,6 +31,7 @@ the repository). The script exits nonzero on any inconsistency.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -88,9 +89,9 @@ DS000030_ACQUISITION_REFERENCE = (
     "e2b194394687738f62b199539cdc7acca6627b40fcd6a4fbb45143891b7410ea"
 )
 DS000030_ACQUISITION_COMPLETED_AT = "2026-07-18T07:34:41.416478Z"
-APPROVED_EXECUTOR_FILE_SHA256 = {
+HARDENED_EXECUTOR_FILE_SHA256 = {
     "scripts/acquire_ds000030_pilot.py": (
-        "63a4d7bc699a63f09b1daac4d3703d1ef0716aa0133371e5ddb3855da0ce219f"
+        "8f6145ce6a7b658320f784c6148d3c74cdb32dbed7312e8fa7635590a73f2d24"
     ),
     "src/neuromultiverse/ds000030_pilot.py": (
         "159f1c4251c5eb81ed6be5a915485e19983977e4447834e006fa8f84ccb58d74"
@@ -506,18 +507,68 @@ def _check_raw_validation_tool() -> list[str]:
         "--manifest",
         "--acquisition-receipt",
         "--output",
-        "--bids-validator",
+        "--docker-executable",
+        "--validator-image",
     ):
         if option not in source:
             problems.append(f"raw validation tool is missing {option}")
-    for forbidden in (".get_fdata(", ".get_data(", "np.asarray(image.dataobj)"):
-        if forbidden in source:
-            problems.append("raw validation tool contains voxel-array access")
+    tree = ast.parse(source, filename=str(path))
+
+    def contains_dataobj(node: ast.AST) -> bool:
+        return any(
+            isinstance(child, ast.Attribute) and child.attr == "dataobj" for child in ast.walk(node)
+        )
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "dataobj":
+            problems.append("raw validation tool accesses a NIfTI data proxy")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr in {"get_fdata", "get_data"}:
+                problems.append("raw validation tool calls a voxel-array materializer")
+            if (
+                isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "np"
+                and node.func.attr in {"asarray", "array", "asanyarray"}
+                and any(contains_dataobj(argument) for argument in node.args)
+            ):
+                problems.append("raw validation tool converts a NIfTI data proxy")
+        if isinstance(node, ast.Subscript) and contains_dataobj(node.value):
+            problems.append("raw validation tool subscripts a NIfTI data proxy")
+        if isinstance(node, ast.For) and contains_dataobj(node.iter):
+            problems.append("raw validation tool iterates a NIfTI data proxy")
+    required_markers = (
+        "8ef7bf22a5e62430c98c0f3e62627f400c62e85c20db3f691e370ddfdc9963c7",
+        '"image", "inspect"',
+        '"--network=none"',
+        '"--read-only"',
+        '"--cap-drop=ALL"',
+        '"--security-opt=no-new-privileges"',
+        "dst=/data,readonly",
+        'VALIDATOR_SCHEMA = "1.2.4"',
+        "total_files != EXPECTED_FILES",
+        "WARNING_CLASSIFICATIONS",
+        "_validate_private_tree",
+        "raw file mode is not 600",
+        "private directory mode is not 700",
+    )
+    for marker in required_markers:
+        if marker not in source:
+            problems.append(f"raw validation tool lacks required boundary marker: {marker}")
     for forbidden_mode in ("--repair", "--fix", "--normalize"):
         if forbidden_mode in source:
             problems.append(f"raw validation tool exposes forbidden mode {forbidden_mode}")
     if any(path.name == ".bidsignore" for path in REPO_ROOT.rglob(".bidsignore")):
         problems.append("repository contains a forbidden .bidsignore")
+    executor = EXECUTOR.read_text(encoding="utf-8")
+    for marker in (
+        "os.O_WRONLY | os.O_CREAT | os.O_EXCL",
+        "os.fdopen",
+        "0o600",
+        "_ensure_private_target_parents",
+        "private directory mode is not 700",
+    ):
+        if marker not in executor:
+            problems.append(f"acquisition executor lacks secure raw creation marker: {marker}")
     return problems
 
 
@@ -688,10 +739,10 @@ def check(records: list[DatasetAccessRecord]) -> list[str]:
         ):
             problems.append(f"{rid}: only ds000030 pilot is authorized for acquisition")
 
-    for rel, expected in APPROVED_EXECUTOR_FILE_SHA256.items():
+    for rel, expected in HARDENED_EXECUTOR_FILE_SHA256.items():
         actual = hashlib.sha256((REPO_ROOT / rel).read_bytes()).hexdigest()
         if actual != expected:
-            problems.append(f"{rel}: approved executor file changed after independent review")
+            problems.append(f"{rel}: hardened executor file differs from the reviewed source")
 
     problems.extend(_check_no_selected_identifiers())
     problems.extend(_check_executor_hardening())
