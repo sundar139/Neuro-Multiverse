@@ -1431,3 +1431,114 @@ def test_hostname_punctuation_only_fails() -> None:
 def test_hostname_double_dot_fails() -> None:
     with pytest.raises(tool.ValidationError):
         tool._validate_public_hostname("a..b")
+
+
+# Invalid dotted IPv4-like hostname tests.
+
+
+def test_hostname_invalid_dotted_ip_999_fails() -> None:
+    with pytest.raises(tool.ValidationError):
+        tool._validate_public_hostname("999.999.999.999")
+
+
+def test_hostname_invalid_dotted_ip_256_fails() -> None:
+    with pytest.raises(tool.ValidationError):
+        tool._validate_public_hostname("256.1.1.1")
+
+
+def test_hostname_truncated_dotted_ip_fails() -> None:
+    with pytest.raises(tool.ValidationError):
+        tool._validate_public_hostname("192.168.1")
+
+
+def test_hostname_leading_zero_dotted_ip_fails() -> None:
+    with pytest.raises(tool.ValidationError):
+        tool._validate_public_hostname("01.02.03.04")
+
+
+def test_hostname_extra_octet_dotted_ip_fails() -> None:
+    with pytest.raises(tool.ValidationError):
+        tool._validate_public_hostname("1.2.3.4.5")
+
+
+# Invalid dotted IPv4 URLs through _strict_json.
+
+
+def test_invalid_dotted_ip_999_url_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://999.999.999.999/reference"})
+
+
+def test_invalid_dotted_ip_256_url_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://256.1.1.1/reference"})
+
+
+def test_truncated_dotted_ip_url_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://192.168.1/reference"})
+
+
+def test_leading_zero_dotted_ip_url_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://01.02.03.04/reference"})
+
+
+def test_extra_octet_dotted_ip_url_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://1.2.3.4.5/reference"})
+
+
+# Overlong IDNA-encoded total hostname.
+
+
+def test_hostname_overlong_idna_total_fails() -> None:
+    label = "ü" * 45
+    hostname = ".".join([label] * 5)
+    with pytest.raises(tool.ValidationError):
+        tool._validate_public_hostname(hostname)
+
+
+# Additional required passing URLs through _strict_json.
+
+
+def test_valid_ipv4_url_passes(tmp_path: Path) -> None:
+    _assert_strict_passes(tmp_path, {"Link": "https://192.0.2.1/reference"})
+
+
+def test_valid_ipv6_url_passes(tmp_path: Path) -> None:
+    _assert_strict_passes(tmp_path, {"Link": "https://[2001:db8::1]/reference"})
+
+
+def test_punycode_url_passes(tmp_path: Path) -> None:
+    _assert_strict_passes(tmp_path, {"Link": "https://xn--bcher-kva.example/reference"})
+
+
+def test_unicode_idna_url_passes(tmp_path: Path) -> None:
+    _assert_strict_passes(tmp_path, {"Link": "https://bücher.example/reference"})
+
+
+def test_plain_dns_url_passes(tmp_path: Path) -> None:
+    _assert_strict_passes(tmp_path, {"Link": "https://example.invalid/reference"})
+
+
+# Additional required failing URLs through _strict_json.
+
+
+def test_leading_hyphen_label_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://-example.com/"})
+
+
+def test_trailing_hyphen_label_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://example-.com/"})
+
+
+def test_underscore_in_hostname_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://_invalid.example.com/"})
+
+
+def test_empty_label_hostname_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://a..b/"})
+
+
+def test_malformed_ipv6_url_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://[2001:db8::1g]/reference"})
+
+
+def test_percent_pseudo_host_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://example%.invalid/reference"})

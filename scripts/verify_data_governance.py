@@ -537,6 +537,10 @@ def _check_raw_validation_tool() -> list[str]:
             problems.append("raw validation tool subscripts a NIfTI data proxy")
         if isinstance(node, ast.For) and contains_dataobj(node.iter):
             problems.append("raw validation tool iterates a NIfTI data proxy")
+    if "_validate_public_url" in source:
+        problems.append(
+            "raw validation tool contains superseded weak validator _validate_public_url"
+        )
     required_markers = (
         "8ef7bf22a5e62430c98c0f3e62627f400c62e85c20db3f691e370ddfdc9963c7",
         '"image", "inspect"',
@@ -600,6 +604,12 @@ def _check_raw_validation_tool() -> list[str]:
         "|/home/|",
         "/Users/",
         "|~/",
+        "ipaddress",
+        'all(c in "0123456789."',
+        '.encode("idna")',
+        "encoded_labels",
+        "ascii_hostname",
+        "len(ascii_hostname) > 253",
     )
     for marker in required_markers:
         if marker not in source:
@@ -711,6 +721,10 @@ def _check_url_classifier_behavior() -> list[str]:
         "https://example.invalid/home/reference",
         "https://example.invalid/Users/guide",
         "See https://one.invalid/reference and https://two.invalid/reference.",
+        "https://192.0.2.1/reference",
+        "https://[2001:db8::1]/reference",
+        "https://xn--bcher-kva.example/reference",
+        "https://bücher.example/reference",
     )
     must_fail = (
         r"https://example.invalid/C:\Users\synthetic\private.txt",
@@ -726,7 +740,22 @@ def _check_url_classifier_behavior() -> list[str]:
         "https://,",
         "https://example.invalid\\private",
         "https://a.invalid,https://b.invalid",
+        "https://999.999.999.999/reference",
+        "https://256.1.1.1/reference",
+        "https://192.168.1/reference",
+        "https://01.02.03.04/reference",
+        "https://-example.com/",
+        "https://example-.com/",
+        "https://_invalid.example.com/",
+        "https://a..b/",
+        "https://[2001:db8::1g]/reference",
+        "https://example%.invalid/reference",
     )
+
+    # Overlong encoded DNS hostname (total encoded > 253 with Unicode input <= 253)
+    _overlong_label = "\xfc" * 45
+    _overlong_hostname = ".".join([_overlong_label] * 5)
+    must_fail_hostnames = (_overlong_hostname,)
 
     for text in must_pass:
         try:
@@ -754,6 +783,13 @@ def _check_url_classifier_behavior() -> list[str]:
             pass
         finally:
             tf_path.unlink(missing_ok=True)
+
+    for hostname in must_fail_hostnames:
+        try:
+            mod._validate_public_hostname(hostname)
+            problems.append(f"public hostname incorrectly accepts: {hostname!r}")
+        except mod.ValidationError:
+            pass
 
     return problems
 

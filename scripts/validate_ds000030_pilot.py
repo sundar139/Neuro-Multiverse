@@ -219,6 +219,8 @@ def _validate_public_hostname(hostname: str) -> None:
         return
     except ValueError:
         pass
+    if all(c in "0123456789." for c in hostname):
+        raise ValidationError("metadata JSON contains a malformed URI")
     if len(hostname) > 253:
         raise ValidationError("metadata JSON contains a malformed URI")
     if hostname.startswith(".") or hostname.endswith("."):
@@ -226,6 +228,7 @@ def _validate_public_hostname(hostname: str) -> None:
     labels = hostname.split(".")
     if not labels:
         raise ValidationError("metadata JSON contains a malformed URI")
+    encoded_labels: list[str] = []
     for label in labels:
         if not label or len(label) > 63:
             raise ValidationError("metadata JSON contains a malformed URI")
@@ -235,6 +238,10 @@ def _validate_public_hostname(hostname: str) -> None:
             raise ValidationError("metadata JSON contains a malformed URI") from None
         if not _HOST_LABEL_RE.match(encoded):
             raise ValidationError("metadata JSON contains a malformed URI")
+        encoded_labels.append(encoded)
+    ascii_hostname = ".".join(encoded_labels)
+    if len(ascii_hostname) > 253:
+        raise ValidationError("metadata JSON contains a malformed URI")
 
 
 def _validate_http_url_token(token: str) -> None:
