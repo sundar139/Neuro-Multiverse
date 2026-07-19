@@ -1117,3 +1117,170 @@ def test_failure_output_and_report_are_sanitized(
 def test_called_process_error_command_is_sanitized() -> None:
     error = subprocess.CalledProcessError(1, ["docker", "run", "/private/raw"])
     assert tool._error_category(error) == "docker_unavailable"
+
+
+def _assert_strict_passes(tmp_path: Path, value: Any) -> None:
+    path = tmp_path / "meta.json"
+    _json(path, value)
+    assert tool._strict_json(path) == value
+
+
+def _assert_strict_raises(tmp_path: Path, value: Any) -> None:
+    path = tmp_path / "meta.json"
+    _json(path, value)
+    with pytest.raises(tool.ValidationError):
+        tool._strict_json(path)
+
+
+# Legitimate public HTTP(S) references must pass strict validation.
+
+
+def test_public_openfmri_url_passes(tmp_path: Path) -> None:
+    _assert_strict_passes(tmp_path, {"ReferencesAndLinks": ["https://openfmri.org/example"]})
+
+
+def test_public_nature_url_passes(tmp_path: Path) -> None:
+    _assert_strict_passes(
+        tmp_path, {"ReferencesAndLinks": ["https://www.nature.com/articles/example"]}
+    )
+
+
+def test_public_f1000_url_passes(tmp_path: Path) -> None:
+    _assert_strict_passes(
+        tmp_path, {"ReferencesAndLinks": ["https://f1000research.com/articles/example"]}
+    )
+
+
+def test_multiple_http_urls_one_string_passes(tmp_path: Path) -> None:
+    _assert_strict_passes(
+        tmp_path,
+        {"Note": "see https://openfmri.org/example and https://www.nature.com/articles/example"},
+    )
+
+
+def test_https_embedded_in_prose_passes(tmp_path: Path) -> None:
+    _assert_strict_passes(
+        tmp_path,
+        {
+            "HowToAcknowledge": "obtained from the database (https://f1000research.com/articles/example)."
+        },
+    )
+
+
+def test_http_historical_reference_passes(tmp_path: Path) -> None:
+    _assert_strict_passes(tmp_path, {"Reference": "http://example.org/1995"})
+
+
+def test_url_with_home_in_remote_path_passes(tmp_path: Path) -> None:
+    _assert_strict_passes(tmp_path, {"Link": "https://example.com/home/user/page"})
+
+
+def test_url_with_users_in_remote_path_passes(tmp_path: Path) -> None:
+    _assert_strict_passes(tmp_path, {"Link": "https://example.com/Users/user/page"})
+
+
+def test_nested_url_values_pass(tmp_path: Path) -> None:
+    _assert_strict_passes(
+        tmp_path,
+        {"Outer": {"Inner": "https://openfmri.org/example"}},
+    )
+
+
+def test_list_of_url_values_pass(tmp_path: Path) -> None:
+    _assert_strict_passes(
+        tmp_path,
+        {"List": ["https://openfmri.org/example", "https://www.nature.com/articles/example"]},
+    )
+
+
+def test_synthetic_dataset_description_passes(tmp_path: Path) -> None:
+    _assert_strict_passes(
+        tmp_path,
+        {
+            "Name": "Synthetic",
+            "BIDSVersion": "1.0.2",
+            "License": "CC0",
+            "ReferencesAndLinks": [
+                "https://www.nature.com/articles/example",
+                "https://f1000research.com/articles/example",
+            ],
+        },
+    )
+
+
+def test_https_never_classified_as_windows_drive_path(tmp_path: Path) -> None:
+    # The regression: the letter+colon before slash in `https://` must not
+    # be read as a Windows drive path such as `C:\`.
+    _assert_strict_passes(tmp_path, {"Url": "https://openfmri.org/example"})
+
+
+# Private local paths must still fail.
+
+
+def test_windows_backslash_drive_path_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Path": "C:\\Users\\name\\file"})
+
+
+def test_windows_forwardslash_drive_path_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Path": "C:/Users/name/file"})
+
+
+def test_embedded_windows_drive_path_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Note": "stored at C:\\private\\data"})
+
+
+def test_unc_path_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Share": "\\\\server\\share"})
+
+
+def test_posix_home_path_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Path": "/home/name/file"})
+
+
+def test_posix_users_path_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Path": "/Users/name/file"})
+
+
+def test_wsl_user_path_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Path": "/mnt/c/Users/name/file"})
+
+
+def test_home_relative_path_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Path": "~/private/file"})
+
+
+def test_file_uri_posix_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Path": "file:///home/name/file"})
+
+
+def test_file_uri_windows_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Path": "file://C:/Users/name/file"})
+
+
+# Credential-bearing and signed URLs must still fail.
+
+
+def test_url_with_username_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://user@example.com/"})
+
+
+def test_url_with_username_password_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://user:pass@example.com/"})
+
+
+def test_signed_url_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(
+        tmp_path, {"Link": "https://example.invalid/object?X-Amz-Signature=secret"}
+    )
+
+
+def test_credential_param_url_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://example.com/?credential=1"})
+
+
+def test_authorization_param_url_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://example.com/?authorization=1"})
+
+
+def test_token_param_url_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://example.com/?token=1"})

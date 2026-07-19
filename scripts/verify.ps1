@@ -63,6 +63,7 @@ function Invoke-Gate {
     Write-Host ''
     Write-Host "--- $Name ---"
     try {
+        $global:LASTEXITCODE = 0
         & $Action
         if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) {
             throw "exit code $LASTEXITCODE"

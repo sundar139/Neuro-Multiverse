@@ -123,7 +123,24 @@ SECRET_RE = re.compile(
     r"X-Amz-|credential|authorization|password|cookie|token|signature",
     re.IGNORECASE,
 )
-PRIVATE_PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/]|/home/|/Users/)")
+# Complete public HTTP(S) URI spans are recognized and validated as a unit
+# before any local-filesystem-path classification runs. A Windows drive
+# letter class such as ``[A-Za-z]:[\\/]`` is applied only to the
+# residual text AFTER public URI spans are removed, never to the ``s:/``
+# inside ``https://``.
+URL_RE = re.compile(r"https?://[^\s'\"]+", re.IGNORECASE)
+# Residual text after public HTTP(S) URI spans are removed: any remaining
+# scheme, Windows/UNC/POSIX/user/home-relative path, or local file URI is
+# rejected.
+RESIDUAL_FORBIDDEN_RE = re.compile(
+    r"(?:[A-Za-z]:[\\/]"  # Windows drive path
+    r"|\\{2,}[^\\/\s]+\\[^\\/\s]+"  # UNC path
+    r"|/home/|/Users/"  # POSIX user paths
+    r"|/mnt/[a-z]/Users/"  # WSL-mounted user path
+    r"|~/"  # home-relative path
+    r"|://"  # non-http(s) scheme (file://, ...)
+    r"|file:)"  # file: scheme
+)
 T1W_RE = re.compile(r"^(sub-[A-Za-z0-9]+)_T1w\.(nii\.gz|json)$")
 BOLD_RE = re.compile(r"^(sub-[A-Za-z0-9]+)_task-rest_bold\.(nii\.gz|json)$")
 
@@ -191,6 +208,44 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _validate_public_url(url: str) -> None:
+    """Accept a well-formed public HTTP(S) reference; reject everything else."""
+    if SECRET_RE.search(url):
+        raise ValidationError("metadata JSON contains prohibited secret or credential material")
+    if "\x00" in url or any(ord(char) < 0x20 for char in url):
+        raise ValidationError("metadata JSON contains a malformed URI")
+    parsed = urllib.parse.urlsplit(url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise ValidationError("metadata JSON contains a prohibited URI scheme")
+    if not parsed.netloc:
+        raise ValidationError("metadata JSON contains a malformed URI")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValidationError("metadata JSON contains a prohibited URI userinfo")
+
+
+def _validate_residual_text(text: str) -> None:
+    """Reject remaining local paths, file URIs, and non-HTTP(S) schemes."""
+    if RESIDUAL_FORBIDDEN_RE.search(text):
+        raise ValidationError("metadata JSON contains prohibited secret or path material")
+
+
+def _validate_metadata_text(text: str) -> None:
+    """Classify decoded JSON strings: public URLs pass, local paths fail."""
+    if SECRET_RE.search(text):
+        raise ValidationError("metadata JSON contains prohibited secret or credential material")
+    parts: list[str] = []
+    last = 0
+    for match in URL_RE.finditer(text):
+        url = match.group(0).rstrip(".,);:]\"'")
+        _validate_public_url(url)
+        parts.append(text[last : match.start()])
+        parts.append(" ")
+        last = match.end()
+    parts.append(text[last:])
+    _validate_residual_text("".join(parts))
+
+
 def _strict_json(path: Path) -> dict[str, Any]:
     if path.stat().st_size > MAX_JSON_BYTES:
         raise ValidationError("metadata JSON exceeds the size limit")
@@ -248,11 +303,9 @@ def _strict_json(path: Path) -> dict[str, Any]:
                 for char in decoded
             ):
                 raise ValidationError("metadata JSON contains a prohibited character")
+            _validate_metadata_text(decoded)
 
     inspect(value)
-    serialized = json.dumps(value, ensure_ascii=False)
-    if SECRET_RE.search(serialized) or PRIVATE_PATH_RE.search(serialized):
-        raise ValidationError("metadata JSON contains prohibited secret or path material")
     return value
 
 

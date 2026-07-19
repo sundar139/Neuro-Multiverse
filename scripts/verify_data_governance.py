@@ -588,6 +588,16 @@ def _check_raw_validation_tool() -> list[str]:
         "environment=environment",
         "check=False",
         "runner_error",
+        "_validate_public_url",
+        "_validate_residual_text",
+        "_validate_metadata_text",
+        "https?://",
+        "urlsplit",
+        "_RESIDUAL_FORBIDDEN_RE",
+        '"file:"',
+        '"/home/"',
+        '"/Users/"',
+        '"~/"',
     )
     for marker in required_markers:
         if marker not in source:
@@ -597,6 +607,14 @@ def _check_raw_validation_tool() -> list[str]:
             problems.append(f"raw validation tool exposes forbidden mode {forbidden_mode}")
     if any(marker in source for marker in (".chmod(", "os.chmod(", ".chown(", "os.chown(")):
         problems.append("raw validation tool contains a forbidden permission-change path")
+    if "PRIVATE_PATH_RE.search(serialized)" in source:
+        problems.append(
+            "raw validation tool runs a context-free drive-path regex over the serialized object"
+        )
+    if "serialized = json.dumps(value" in source:
+        problems.append("raw validation tool still serializes the object for a blob path scan")
+    if "raw_validation_completed" in source:
+        problems.append("raw validation tool contains a raw-validation completion concept")
     if '"blocking_issues": [str(exc)]' in source or '"problem": str(exc)' in source:
         problems.append("raw validation tool exposes raw exception text")
     if "os.environ.copy(" in source or "dict(os.environ)" in source:
