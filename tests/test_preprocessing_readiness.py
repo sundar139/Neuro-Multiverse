@@ -22,6 +22,7 @@ import yaml
 
 from neuromultiverse.data_contracts import AccessStatus, DatasetAccessRecord
 from neuromultiverse.preprocessing_readiness import (
+    AUTHORIZED_GRANTOR,
     DS000030_ACQUISITION_REFERENCE,
     DS000030_BIDS_SCHEMA_VERSION,
     DS000030_PERMISSION_REFERENCE,
@@ -30,6 +31,7 @@ from neuromultiverse.preprocessing_readiness import (
     DS000030_VALIDATOR_VERSION,
     PIPELINES,
     SELECTION_REFERENCE_PREFIX,
+    ValidationMode,
     evaluate_preprocessing_readiness,
     validate_execution_plan,
     validate_subject_selection_reference,
@@ -728,3 +730,208 @@ def test_plan_validation_does_not_traverse_the_external_roots(
         monkeypatch.setattr(Path, attribute, _forbid(attribute), raising=False)
     result = validate_execution_plan(_filled_plan(tmp_path), repository_root=_REPO_ROOT)
     assert result.valid is True, result.blocking_issues
+
+
+# --- execution-mode authorization ---------------------------------------------
+#
+# Dry-run proves a plan authorizes nothing; execution proves a human signed it.
+# Neither mode runs a pipeline. The signature's contents never reach the summary.
+
+_AUTHORIZATION_REFERENCE = "nm-ds000030-one-subject-exec-20260719-001"
+_AUTHORIZATION_STAMP = "2026-07-19T06:00:00Z"
+_VALID_AUTHORIZATION: dict[str, Any] = {
+    "granted": True,
+    "granted_by": AUTHORIZED_GRANTOR,
+    "granted_at_utc": _AUTHORIZATION_STAMP,
+    "reference": _AUTHORIZATION_REFERENCE,
+}
+
+
+def _execution_plan(tmp_path: Path, **authorization: Any) -> dict[str, Any]:
+    """A plan carrying a filled, signed authorization block."""
+    plan = _filled_plan(tmp_path)
+    plan["authorizes_execution"] = True
+    plan["preparation_only"] = False
+    plan["authorization"] = {**_VALID_AUTHORIZATION, **authorization}
+    return plan
+
+
+def test_dry_run_with_empty_authorization_still_passes(tmp_path: Path) -> None:
+    result = validate_execution_plan(
+        _filled_plan(tmp_path), repository_root=_REPO_ROOT, mode="dry-run"
+    )
+    assert result.valid is True, result.blocking_issues
+    assert result.mode == "dry-run"
+    assert result.authorization_verified is False
+
+
+def test_dry_run_rejects_a_filled_authorization(tmp_path: Path) -> None:
+    result = validate_execution_plan(
+        _execution_plan(tmp_path), repository_root=_REPO_ROOT, mode="dry-run"
+    )
+    assert result.valid is False
+    assert result.authorization_verified is False
+    assert any("must be false in dry-run" in issue for issue in result.blocking_issues)
+
+
+def test_execution_mode_accepts_a_signed_authorization(tmp_path: Path) -> None:
+    result = validate_execution_plan(
+        _execution_plan(tmp_path), repository_root=_REPO_ROOT, mode="execution"
+    )
+    assert result.valid is True, result.blocking_issues
+    assert result.mode == "execution"
+    assert result.authorization_verified is True
+    assert result.preprocessing_executed is False
+
+
+def test_execution_mode_rejects_an_empty_authorization(tmp_path: Path) -> None:
+    result = validate_execution_plan(
+        _filled_plan(tmp_path), repository_root=_REPO_ROOT, mode="execution"
+    )
+    assert result.valid is False
+    assert result.authorization_verified is False
+    assert any("must be true in execution" in issue for issue in result.blocking_issues)
+
+
+def test_execution_mode_requires_a_missing_authorization_block(tmp_path: Path) -> None:
+    plan = _execution_plan(tmp_path)
+    del plan["authorization"]
+    result = validate_execution_plan(plan, repository_root=_REPO_ROOT, mode="execution")
+    assert result.valid is False
+    assert any("authorization must be declared" in issue for issue in result.blocking_issues)
+
+
+@pytest.mark.parametrize(
+    "key, value, expected",
+    [
+        ("authorizes_execution", False, "authorizes_execution must be true"),
+        ("preparation_only", True, "preparation_only must be false"),
+    ],
+)
+def test_execution_mode_rejects_preparation_flags(
+    tmp_path: Path, key: str, value: Any, expected: str
+) -> None:
+    plan = _execution_plan(tmp_path)
+    plan[key] = value
+    result = validate_execution_plan(plan, repository_root=_REPO_ROOT, mode="execution")
+    assert result.valid is False
+    assert any(expected in issue for issue in result.blocking_issues)
+
+
+@pytest.mark.parametrize(
+    "field, value, expected",
+    [
+        ("granted", False, "authorization.granted must be true"),
+        ("granted", None, "authorization.granted must be true"),
+        ("granted_by", "", "not the authorized grantor"),
+        ("granted_by", "Someone Else", "not the authorized grantor"),
+        ("granted_by", None, "not the authorized grantor"),
+        ("granted_at_utc", "", "nonblank UTC timestamp"),
+        ("granted_at_utc", "2026-07-19T06:00:00", "must be UTC and end with Z"),
+        ("granted_at_utc", "2026-07-19T06:00:00+05:30", "must be UTC and end with Z"),
+        ("granted_at_utc", "not-a-timestamp-Z", "not a valid ISO-8601 timestamp"),
+        ("reference", "", "nm-ds000030-one-subject-exec-"),
+        ("reference", "   ", "nm-ds000030-one-subject-exec-"),
+        ("reference", "nm-wrong-namespace-001", "nm-ds000030-one-subject-exec-"),
+        ("reference", "nm-ds000030-one-subject-exec-../escape", "nm-ds000030-one-subject-exec-"),
+        ("reference", "nm-ds000030-one-subject-exec-has space", "nm-ds000030-one-subject-exec-"),
+        ("reference", "nm-ds000030-one-subject-exec-", "nm-ds000030-one-subject-exec-"),
+    ],
+)
+def test_execution_mode_rejects_a_malformed_signature(
+    tmp_path: Path, field: str, value: Any, expected: str
+) -> None:
+    result = validate_execution_plan(
+        _execution_plan(tmp_path, **{field: value}), repository_root=_REPO_ROOT, mode="execution"
+    )
+    assert result.valid is False
+    assert result.authorization_verified is False
+    assert any(expected in issue for issue in result.blocking_issues)
+
+
+def test_execution_summary_never_echoes_the_signature(tmp_path: Path) -> None:
+    """The verdict reports that a signature verified, never what it said."""
+    result = validate_execution_plan(
+        _execution_plan(tmp_path), repository_root=_REPO_ROOT, mode="execution"
+    )
+    rendered = repr(result.model_dump())
+    assert AUTHORIZED_GRANTOR not in rendered
+    assert _AUTHORIZATION_REFERENCE not in rendered
+    assert _AUTHORIZATION_STAMP not in rendered
+    assert result.authorization_verified is True
+
+
+@pytest.mark.parametrize("mode", ["dry-run", "execution"])
+def test_both_modes_still_refuse_every_prior_prohibition(
+    tmp_path: Path, mode: ValidationMode
+) -> None:
+    """Mode changes only the authorization contract; every other gate stands."""
+    build = _filled_plan if mode == "dry-run" else _execution_plan
+
+    def check(mutate: Any, expected: str) -> None:
+        plan = build(tmp_path)
+        mutate(plan)
+        result = validate_execution_plan(plan, repository_root=_REPO_ROOT, mode=mode)
+        assert result.valid is False, f"{mode}: {expected}"
+        assert any(expected in issue for issue in result.blocking_issues), result.blocking_issues
+
+    check(lambda p: p["prohibitions"].update(expansion=True), "prohibitions.expansion")
+    check(lambda p: p["prohibitions"].update(abide_acquisition=True), "prohibitions.abide")
+    check(lambda p: p["prohibitions"].update(cobre_acquisition=True), "prohibitions.cobre")
+    check(lambda p: p["prohibitions"].update(acquisition=True), "prohibitions.acquisition")
+    check(lambda p: p["prohibitions"].update(push=True), "prohibitions.push")
+    check(lambda p: p.update(authorizes_push=True), "authorizes_push")
+    check(lambda p: p["dataset"].update(accession="abide_i_pcp"), "dataset.accession")
+    check(
+        lambda p: p["dataset"].update(acquisition_scope_id="ds000030_controlled_20"),
+        "acquisition_scope_id",
+    )
+    check(
+        lambda p: p["accepted_evidence"].update(raw_validation_warning_count=138),
+        "raw_validation_warning_count",
+    )
+    check(
+        lambda p: p["accepted_evidence"].update(acquisition_reference="x:" + "0" * 64),
+        "acquisition_reference",
+    )
+    check(lambda p: p["subject_selection"].update(reference="sub-SYNTH01"), "subject_selection")
+    check(lambda p: p["pipelines"]["fsl"].update(output_spaces=[]), "output_spaces")
+    check(lambda p: p["pipelines"]["afni"].update(resource_limits={}), "resource_limits")
+    check(
+        lambda p: p["pipelines"]["fmriprep"].update(container_reference=""), "container_reference"
+    )
+    check(lambda p: p.update(freesurfer_license_path=""), "freesurfer_license_path")
+    check(
+        lambda p: p["external_paths"].update(raw_root=str(_REPO_ROOT / "data")),
+        "outside the repository",
+    )
+    check(lambda p: p["claims"].update(preprocessing_success=True), "claims")
+
+
+def _run_cli(plan: dict[str, Any], tmp_path: Path, *extra: str) -> int:
+    """Invoke the CLI in-process. Runs no preprocessing in any mode."""
+    spec = importlib.util.spec_from_file_location("_preflight_cli", _PREFLIGHT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    plan_path = tmp_path / "plan.yaml"
+    plan_path.write_text(yaml.safe_dump(plan, sort_keys=False), encoding="utf-8")
+    exit_code: int = module.main(["--plan", str(plan_path), *extra])
+    return exit_code
+
+
+def test_cli_dry_run_rejects_a_filled_authorization(tmp_path: Path) -> None:
+    assert _run_cli(_execution_plan(tmp_path), tmp_path) == 1
+    assert _run_cli(_execution_plan(tmp_path), tmp_path, "--validation-mode", "dry-run") == 1
+
+
+def test_cli_execution_mode_accepts_a_filled_authorization(tmp_path: Path) -> None:
+    assert _run_cli(_execution_plan(tmp_path), tmp_path, "--validation-mode", "execution") == 0
+
+
+def test_cli_execution_mode_rejects_an_empty_authorization(tmp_path: Path) -> None:
+    assert _run_cli(_filled_plan(tmp_path), tmp_path, "--validation-mode", "execution") == 1
+
+
+def test_cli_defaults_to_dry_run(tmp_path: Path) -> None:
+    assert _run_cli(_filled_plan(tmp_path), tmp_path) == 0

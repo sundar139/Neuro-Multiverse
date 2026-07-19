@@ -20,6 +20,7 @@ import os
 import re
 import stat
 from collections.abc import Mapping
+from datetime import datetime, timedelta
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal
 
@@ -38,6 +39,7 @@ from neuromultiverse.ds000030_pilot import (
 )
 
 __all__ = [
+    "AUTHORIZED_GRANTOR",
     "DS000030_ACQUISITION_REFERENCE",
     "DS000030_BIDS_SCHEMA_VERSION",
     "DS000030_PERMISSION_REFERENCE",
@@ -52,6 +54,7 @@ __all__ = [
     "SELECTION_REFERENCE_PREFIX",
     "PlanValidation",
     "PreprocessingReadiness",
+    "ValidationMode",
     "evaluate_preprocessing_readiness",
     "validate_execution_plan",
     "validate_subject_selection_reference",
@@ -249,13 +252,25 @@ _FORBIDDEN_AUTHORIZATIONS = (
     "authorizes_cobre",
 )
 
+#: ``dry-run`` proves a plan is well formed while authorizing nothing.
+#: ``execution`` additionally requires a filled, human-signed authorization
+#: block. Neither mode runs a pipeline; the second only permits one.
+ValidationMode = Literal["dry-run", "execution"]
+
+#: The only person who may sign an execution authorization for this project.
+AUTHORIZED_GRANTOR = "Rohith Sundar Jonnalagadda"
+
+#: Authorization references are opaque, filesystem-safe, and namespaced to this
+#: exact unit, so one unit's signature cannot be replayed for another.
+_AUTHORIZATION_REFERENCE_RE = re.compile(r"^nm-ds000030-one-subject-exec-[A-Za-z0-9._-]{1,64}$")
+
 
 class PlanValidation(BaseModel):
     """The outcome of validating a filled execution plan. Path-free by design."""
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
-    mode: Literal["dry-run"] = "dry-run"
+    mode: ValidationMode = "dry-run"
     preprocessing_executed: Literal[False] = False
     valid: bool
     blocking_issues: list[str] = Field(default_factory=list)
@@ -272,6 +287,9 @@ class PlanValidation(BaseModel):
     freesurfer_license_declared: bool = False
     freesurfer_license_contents_read: Literal[False] = False
     fmriprep_container_declared: bool = False
+    #: True only in execution mode with a well-formed signed authorization. The
+    #: signature's contents (who, when, which reference) are never echoed here.
+    authorization_verified: bool = False
 
 
 def _is_absolute_path(value: str) -> bool:
@@ -334,6 +352,76 @@ def _check_external_root(
     return True
 
 
+def _check_authorization(plan: Mapping[str, Any], mode: ValidationMode, issues: list[str]) -> bool:
+    """Validate the authorization block for the requested mode.
+
+    Dry-run demands the block be *empty*: a valid dry-run plan authorizes
+    nothing, which is the property the whole gate exists to guarantee.
+    Execution demands the block be filled and signed by the authorized grantor.
+    Neither branch echoes the signature's contents.
+    """
+    authorization = plan.get("authorization")
+    if not isinstance(authorization, Mapping):
+        issues.append("authorization must be declared")
+        return False
+
+    if mode == "dry-run":
+        if plan.get("authorizes_execution") is not False:
+            issues.append("authorizes_execution must be false in dry-run validation")
+        if plan.get("preparation_only") is not True:
+            issues.append("preparation_only must be true in dry-run validation")
+        if authorization.get("granted") is not False:
+            issues.append("authorization.granted must be false in dry-run validation")
+        for field in ("granted_by", "granted_at_utc", "reference"):
+            if authorization.get(field) != "":
+                issues.append(f"authorization.{field} must be empty in dry-run validation")
+        return False
+
+    if plan.get("authorizes_execution") is not True:
+        issues.append("authorizes_execution must be true in execution validation")
+    if plan.get("preparation_only") is not False:
+        issues.append("preparation_only must be false in execution validation")
+    if authorization.get("granted") is not True:
+        issues.append("authorization.granted must be true in execution validation")
+
+    granted_by = authorization.get("granted_by")
+    if granted_by != AUTHORIZED_GRANTOR:
+        issues.append("authorization.granted_by is not the authorized grantor")
+
+    stamp = authorization.get("granted_at_utc")
+    stamp_ok = False
+    if not isinstance(stamp, str) or not stamp.strip():
+        issues.append("authorization.granted_at_utc must be a nonblank UTC timestamp")
+    elif not stamp.endswith("Z"):
+        issues.append("authorization.granted_at_utc must be UTC and end with Z")
+    else:
+        try:
+            parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        except ValueError:
+            issues.append("authorization.granted_at_utc is not a valid ISO-8601 timestamp")
+        else:
+            if parsed.utcoffset() != timedelta(0):
+                issues.append("authorization.granted_at_utc must have a zero UTC offset")
+            else:
+                stamp_ok = True
+
+    reference = authorization.get("reference")
+    reference_ok = isinstance(reference, str) and bool(_AUTHORIZATION_REFERENCE_RE.match(reference))
+    if not reference_ok:
+        issues.append(
+            "authorization.reference must match nm-ds000030-one-subject-exec-<safe suffix>"
+        )
+
+    return bool(
+        plan.get("authorizes_execution") is True
+        and plan.get("preparation_only") is False
+        and authorization.get("granted") is True
+        and granted_by == AUTHORIZED_GRANTOR
+        and stamp_ok
+        and reference_ok
+    )
+
+
 def _check_pipeline(
     name: str,
     section: Any,
@@ -372,21 +460,24 @@ def validate_execution_plan(
     plan: Mapping[str, Any],
     *,
     repository_root: Path,
-    mode: Literal["dry-run"] = "dry-run",
+    mode: ValidationMode = "dry-run",
 ) -> PlanValidation:
     """Validate a filled one-subject execution plan without running anything.
 
     ``plan`` is the parsed external YAML. Nothing in the returned value can
     identify a participant or disclose an external path: paths are reduced to
     booleans and the selection stays an opaque digest.
+
+    ``mode`` selects the authorization contract. ``dry-run`` requires an empty
+    authorization block, so a valid plan authorizes nothing. ``execution``
+    requires a filled block signed by the authorized grantor. **Neither mode
+    runs a pipeline**: execution validation only permits a later run, it never
+    performs one.
     """
     issues: list[str] = []
     advisories: list[str] = []
 
-    if plan.get("authorizes_execution") is not False:
-        issues.append("authorizes_execution must be false in dry-run validation")
-    if plan.get("preparation_only") is not True:
-        issues.append("preparation_only must be true in dry-run validation")
+    authorization_verified = _check_authorization(plan, mode, issues)
     for key in _FORBIDDEN_AUTHORIZATIONS:
         if plan.get(key):
             issues.append(f"{key} is not granted and must not be asserted")
@@ -397,19 +488,6 @@ def validate_execution_plan(
         for key in ("expansion", "abide_acquisition", "cobre_acquisition", "push", "acquisition"):
             if prohibitions.get(key) is not False:
                 issues.append(f"prohibitions.{key} must be declared false (not authorized)")
-
-    # A dry-run plan must carry an empty authorization block. A filled one would
-    # be a plan asserting its own execution grant, which is exactly what dry-run
-    # validation exists to refuse: a valid plan authorizes nothing.
-    authorization = plan.get("authorization")
-    if not isinstance(authorization, Mapping):
-        issues.append("authorization must be declared")
-    else:
-        if authorization.get("granted") is not False:
-            issues.append("authorization.granted must be false in dry-run validation")
-        for field in ("granted_by", "granted_at_utc", "reference"):
-            if authorization.get(field) != "":
-                issues.append(f"authorization.{field} must be empty in dry-run validation")
 
     dataset = plan.get("dataset")
     accession: str | None = None
@@ -522,4 +600,5 @@ def validate_execution_plan(
         resource_limits_declared=limits,
         freesurfer_license_declared=license_ok,
         fmriprep_container_declared=container_ok,
+        authorization_verified=authorization_verified,
     )

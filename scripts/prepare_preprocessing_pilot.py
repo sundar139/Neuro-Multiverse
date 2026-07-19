@@ -112,6 +112,7 @@ def summarize_plan(validation: PlanValidation) -> dict[str, Any]:
         "freesurfer_license_declared": validation.freesurfer_license_declared,
         "freesurfer_license_contents_read": validation.freesurfer_license_contents_read,
         "fmriprep_container_declared": validation.fmriprep_container_declared,
+        "authorization_verified": validation.authorization_verified,
         "advisories": validation.advisories,
         "blocking_issues": validation.blocking_issues,
     }
@@ -142,8 +143,18 @@ def parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "path to a filled execution plan outside the repository; validates it in dry-run "
-            "mode. No pipeline, container, or raw file is touched either way."
+            "path to a filled execution plan outside the repository; validates it. "
+            "No pipeline, container, or raw file is touched either way."
+        ),
+    )
+    result.add_argument(
+        "--validation-mode",
+        choices=("dry-run", "execution"),
+        default="dry-run",
+        help=(
+            "dry-run (default) requires an empty authorization block, so a valid plan "
+            "authorizes nothing; execution requires a filled block signed by the "
+            "authorized grantor. Neither mode runs any preprocessing."
         ),
     )
     return result
@@ -165,16 +176,24 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.plan is not None:
+        mode = args.validation_mode
         validation = validate_execution_plan(
-            _load_plan(args.plan), repository_root=REPO_ROOT, mode="dry-run"
+            _load_plan(args.plan), repository_root=REPO_ROOT, mode=mode
         )
         print(json.dumps(summarize_plan(validation), indent=2, sort_keys=True))
         if not validation.valid:
             print(
-                "RESULT: PLAN REJECTED — dry-run validation failed "
+                f"RESULT: PLAN REJECTED — {mode} validation failed "
                 f"({len(validation.blocking_issues)} blocking issue(s)). Nothing was executed."
             )
             return 1
+        if mode == "execution":
+            print(
+                "RESULT: PLAN VALID (EXECUTION AUTHORIZATION VERIFIED) — no preprocessing was "
+                f"run by this command. A later run across {', '.join(PIPELINES)} is now "
+                "permitted by the signed authorization in the plan."
+            )
+            return 0
         print(
             "RESULT: PLAN VALID (DRY RUN) — no preprocessing was run. "
             f"Execution across {', '.join(PIPELINES)} still requires separate explicit "
