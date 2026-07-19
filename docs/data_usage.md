@@ -75,7 +75,15 @@ The approval covered only this completed transfer. This evidence commit invalida
 
 Raw structural validation completed on 2026-07-19. The validated file set is exactly the 22 raw files and 187,570,603 bytes from acquisition. All files are mode 600 (permission reference `ds000030-pilot-permissions-sha256:aeb62b14a73926783543311e3953a1542f2dde5f57cb1b9a7e0216407157680e`) and all 16 required private directories (raw root, five subject, five anat, five func) are mode 700. Hashes, sizes, ownership, device/inode identities, and mtimes are unchanged from acquisition.
 
-The official BIDS Validator (`bids/validator@sha256:8ef7bf2…`) image ran under the hardened validator with --network=none and --read-only; no raw metadata was rewritten, no data was reacquired, and no voxel array was loaded. Result: **0 errors, 139 warnings** (3 JSON_KEY_RECOMMENDED, 135 SIDECAR_KEY_RECOMMENDED, 1 README_FILE_MISSING), and **0 ignored** files. All 139 warnings are recommendations only and do not affect structural soundness. Preprocessing has not begun. Full evidence: `ds000030-pilot-raw-validation-sha256:41c31c09f0fbacc0425f2847333d5e20fd70edec4811a2a251cf5c134c5822ec`. ABIDE and COBRE remain blocked, and the approximately 20-subject expansion remains unauthorized.
+The official BIDS Validator image `bids/validator@sha256:8ef7bf22a5e62430c98c0f3e62627f400c62e85c20db3f691e370ddfdc9963c7` (validator 3.0.0, BIDS schema 1.2.4) ran under the hardened validator with --network=none and --read-only; no raw metadata was rewritten, no data was reacquired, and no voxel array was loaded. Result: **0 errors, 139 warnings** (3 JSON_KEY_RECOMMENDED, 135 SIDECAR_KEY_RECOMMENDED, 1 README_FILE_MISSING), and **0 ignored** files. All 139 warnings are recommendations only and do not affect structural soundness. Preprocessing has not begun. ABIDE and COBRE remain blocked, and the approximately 20-subject expansion remains unauthorized.
+
+The public identity of this validation is the aggregate execution receipt, which binds every supporting artifact into one decision:
+
+- Canonical evidence: `ds000030-pilot-raw-validation-sha256:b10cb77f6d2b8a5b3f9ca4154935b2d87eb2725d420f6e639d5bd9c0a9a51261`
+- Detailed report SHA-256: `41c31c09f0fbacc0425f2847333d5e20fd70edec4811a2a251cf5c134c5822ec`
+- Raw validator output SHA-256: `a7de9e4f9e345b3d78f24fccdf8cea5e2f30fe986914d8261b4624668b3f01e2`
+- Pre-validation snapshot SHA-256: `3ff13abfcc62b385594b09cbfcefefd187701a72c448b38506d97d12c954cd6d`
+- Completion timestamp: `2026-07-19T05:06:30.303343Z`; validated 22 files, 187,570,603 bytes; 0 changed raw files, 0 raw files modified, 0 voxel arrays loaded.
 
 ## 4. Standing prohibitions
 

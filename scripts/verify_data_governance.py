@@ -37,7 +37,7 @@ import json
 import os
 import re
 import tempfile
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from neuromultiverse.data_contracts import (
@@ -90,17 +90,44 @@ DS000030_ACQUISITION_REFERENCE = (
     "e2b194394687738f62b199539cdc7acca6627b40fcd6a4fbb45143891b7410ea"
 )
 DS000030_ACQUISITION_COMPLETED_AT = "2026-07-18T07:34:41.416478Z"
-DS000030_RAW_VALIDATION_EVIDENCE_REFERENCE = (
-    "ds000030-pilot-raw-validation-sha256:"
-    "41c31c09f0fbacc0425f2847333d5e20fd70edec4811a2a251cf5c134c5822ec"
+# The public identity of the raw validation is the *aggregate execution
+# receipt*: the single artifact that binds the detailed report, the raw
+# validator output, the pre-validation snapshot, the permission receipt, and
+# the manifest into one decision. The supporting digests below each keep their
+# own role and are never promoted to the public evidence identity.
+DS000030_RAW_VALIDATION_RECEIPT_SHA256 = (
+    "b10cb77f6d2b8a5b3f9ca4154935b2d87eb2725d420f6e639d5bd9c0a9a51261"
 )
+DS000030_RAW_VALIDATION_REFERENCE = (
+    f"ds000030-pilot-raw-validation-sha256:{DS000030_RAW_VALIDATION_RECEIPT_SHA256}"
+)
+DS000030_PERMISSION_REFERENCE = (
+    "ds000030-pilot-permissions-sha256:"
+    "aeb62b14a73926783543311e3953a1542f2dde5f57cb1b9a7e0216407157680e"
+)
+DS000030_RAW_VALIDATION_SOURCE_COMMIT = "8b61eca3197e56f6a18d2c7d2910dc4700871b17"
 DS000030_RAW_VALIDATION_COMPLETED_AT = "2026-07-19T05:06:30.303343Z"
 DS000030_RAW_VALIDATOR_OUTPUT_SHA256 = (
     "a7de9e4f9e345b3d78f24fccdf8cea5e2f30fe986914d8261b4624668b3f01e2"
 )
+DS000030_RAW_VALIDATION_REPORT_SHA256 = (
+    "41c31c09f0fbacc0425f2847333d5e20fd70edec4811a2a251cf5c134c5822ec"
+)
 DS000030_PRE_VALIDATION_SNAPSHOT_SHA256 = (
     "3ff13abfcc62b385594b09cbfcefefd187701a72c448b38506d97d12c954cd6d"
 )
+DS000030_VALIDATOR_IMAGE = (
+    "bids/validator@sha256:8ef7bf22a5e62430c98c0f3e62627f400c62e85c20db3f691e370ddfdc9963c7"
+)
+DS000030_VALIDATOR_VERSION = "3.0.0"
+DS000030_BIDS_SCHEMA_VERSION = "1.2.4"
+DS000030_VALIDATED_FILE_COUNT = 22
+DS000030_RAW_VALIDATION_WARNING_COUNT = 139
+DS000030_WARNING_COUNTS = {
+    "JSON_KEY_RECOMMENDED": 3,
+    "SIDECAR_KEY_RECOMMENDED": 135,
+    "README_FILE_MISSING": 1,
+}
 HARDENED_EXECUTOR_FILE_SHA256 = {
     "scripts/acquire_ds000030_pilot.py": (
         "2cfd77aa546617aa4ddebbe41a71700e8f26848c06b4d048bea65eb1d95f0b96"
@@ -281,10 +308,10 @@ def required_records() -> list[DatasetAccessRecord]:
             acquisition_evidence_reference=DS000030_ACQUISITION_REFERENCE,
             acquisition_completed_at_utc=DS000030_ACQUISITION_COMPLETED_AT,
             raw_validation_completed=True,
-            raw_validation_evidence_reference=DS000030_RAW_VALIDATION_EVIDENCE_REFERENCE,
+            raw_validation_evidence_reference=DS000030_RAW_VALIDATION_REFERENCE,
             raw_validation_completed_at_utc=DS000030_RAW_VALIDATION_COMPLETED_AT,
             raw_validation_error_count=0,
-            raw_validation_warning_count=139,
+            raw_validation_warning_count=DS000030_RAW_VALIDATION_WARNING_COUNT,
             raw_validation_ignored_count=0,
         ),
         DatasetAccessRecord(
@@ -514,6 +541,147 @@ def _check_executor_hardening() -> list[str]:
         if data.get("decision") == "approved":
             problems.append(f"{record.name}: a committed approval record must not authorize")
     return problems
+
+
+def _check_ds000030_raw_validation(record: DatasetAccessRecord) -> list[str]:
+    """Bind the ds000030 record to the accepted raw-validation evidence chain.
+
+    The public evidence identity is the aggregate execution receipt. The
+    detailed report, the raw validator output, the pre-validation snapshot, and
+    the permission receipt stay pinned in their own supporting roles, so a
+    supporting digest can never be substituted for the canonical reference.
+    """
+    problems: list[str] = []
+    if not record.raw_validation_completed:
+        problems.append("ds000030: raw validation must be completed")
+    reference = record.raw_validation_evidence_reference
+    if reference != DS000030_RAW_VALIDATION_REFERENCE:
+        problems.append("ds000030: raw validation evidence reference mismatch")
+    if reference is None or not reference.endswith(DS000030_RAW_VALIDATION_RECEIPT_SHA256):
+        problems.append(
+            "ds000030: raw validation reference must carry the execution-receipt digest"
+        )
+    completed_at = record.raw_validation_completed_at_utc
+    if (
+        completed_at is None
+        or completed_at.isoformat().replace("+00:00", "Z") != DS000030_RAW_VALIDATION_COMPLETED_AT
+    ):
+        problems.append("ds000030: raw validation completion timestamp mismatch")
+    if completed_at is not None and completed_at.utcoffset() != timedelta(0):
+        problems.append("ds000030: raw validation completion timestamp is not UTC")
+    if record.raw_validation_error_count != 0:
+        problems.append("ds000030: raw validation must have zero errors")
+    if record.raw_validation_warning_count != DS000030_RAW_VALIDATION_WARNING_COUNT:
+        problems.append(
+            "ds000030: raw validation warning count must be exactly "
+            f"{DS000030_RAW_VALIDATION_WARNING_COUNT}"
+        )
+    if record.raw_validation_ignored_count != 0:
+        problems.append("ds000030: raw validation must have zero ignored")
+
+    # Each supporting digest keeps a distinct role; none may collapse into the
+    # canonical reference or into one another.
+    if sum(DS000030_WARNING_COUNTS.values()) != DS000030_RAW_VALIDATION_WARNING_COUNT:
+        problems.append("ds000030: warning-code counts do not sum to the accepted warning total")
+    if set(DS000030_WARNING_COUNTS) != {
+        "JSON_KEY_RECOMMENDED",
+        "SIDECAR_KEY_RECOMMENDED",
+        "README_FILE_MISSING",
+    }:
+        problems.append("ds000030: warning-code keys are not the three approved codes")
+    supporting = {
+        "detailed report": DS000030_RAW_VALIDATION_REPORT_SHA256,
+        "raw validator output": DS000030_RAW_VALIDATOR_OUTPUT_SHA256,
+        "pre-validation snapshot": DS000030_PRE_VALIDATION_SNAPSHOT_SHA256,
+    }
+    for role, digest in supporting.items():
+        if digest == DS000030_RAW_VALIDATION_RECEIPT_SHA256:
+            problems.append(
+                f"ds000030: {role} digest must stay distinct from the execution receipt"
+            )
+    if len(set(supporting.values())) != len(supporting):
+        problems.append("ds000030: supporting evidence digests must remain separately pinned")
+    if not DS000030_PERMISSION_REFERENCE.startswith("ds000030-pilot-permissions-sha256:"):
+        problems.append("ds000030: permission receipt reference uses an unapproved format")
+    if len(DS000030_RAW_VALIDATION_SOURCE_COMMIT) != 40:
+        problems.append("ds000030: raw validation source commit is not a full commit id")
+    if DS000030_VALIDATED_FILE_COUNT != DS000030_PILOT_FILE_COUNT:
+        problems.append("ds000030: validated file count does not match the pilot plan")
+    # The validator source is the authority for the image, version, and schema
+    # it actually ran; the governance constants must agree with it, not merely
+    # with themselves.
+    validator_source = (REPO_ROOT / "scripts" / "validate_ds000030_pilot.py").read_text(
+        encoding="utf-8"
+    )
+    for label, marker in (
+        ("validator image", f'"{DS000030_VALIDATOR_IMAGE}"'),
+        ("validator version", f'VALIDATOR_VERSION = "{DS000030_VALIDATOR_VERSION}"'),
+        ("BIDS schema", f'VALIDATOR_SCHEMA = "{DS000030_BIDS_SCHEMA_VERSION}"'),
+        ("validated file count", f"EXPECTED_FILES = {DS000030_VALIDATED_FILE_COUNT}"),
+    ):
+        if marker not in validator_source:
+            problems.append(f"ds000030: {label} does not match the pinned validation source")
+    if "scripts/validate_ds000030_pilot.py" not in HARDENED_EXECUTOR_FILE_SHA256:
+        problems.append("ds000030: raw validation source file is not pinned")
+    problems.extend(_check_documented_evidence_chain())
+    # The bounded pilot remains the only authorized scope; the planned ~20-subject
+    # controlled subset is never authorized by this record.
+    if (
+        record.acquisition_scope_id != "ds000030_pilot_5_subjects"
+        or record.expected_size_bytes != DS000030_PILOT_EXPECTED_BYTES
+    ):
+        problems.append("ds000030: completed validation must stay bound to the five-subject pilot")
+    return problems
+
+
+def _check_documented_evidence_chain() -> list[str]:
+    """The disclosed documents must name the canonical reference, not a part of it.
+
+    Every raw-validation evidence reference published in the governance
+    documents identifies the aggregate execution receipt. A supporting digest
+    may still appear, but only in its own labelled role.
+    """
+    problems: list[str] = []
+    documents = {
+        "docs/data_usage.md": DATA_USAGE,
+        "docs/acquisition_register.md": ACQUISITION_REGISTER,
+        "docs/security.md": REPO_ROOT / "docs" / "security.md",
+    }
+    superseded = f"ds000030-pilot-raw-validation-sha256:{DS000030_RAW_VALIDATION_REPORT_SHA256}"
+    for name, path in documents.items():
+        text = path.read_text(encoding="utf-8")
+        if DS000030_RAW_VALIDATION_REFERENCE not in text:
+            problems.append(f"{name}: missing the canonical raw-validation evidence reference")
+        if superseded in text:
+            problems.append(f"{name}: still names the detailed report as the evidence identity")
+        for label, digest in (
+            ("detailed report", DS000030_RAW_VALIDATION_REPORT_SHA256),
+            ("raw validator output", DS000030_RAW_VALIDATOR_OUTPUT_SHA256),
+            ("pre-validation snapshot", DS000030_PRE_VALIDATION_SNAPSHOT_SHA256),
+        ):
+            if digest not in text:
+                problems.append(f"{name}: does not record the {label} digest separately")
+        if DS000030_VALIDATOR_IMAGE not in text:
+            problems.append(f"{name}: does not record the exact validator image digest")
+        if DS000030_RAW_VALIDATION_COMPLETED_AT not in text:
+            problems.append(f"{name}: does not record the exact completion timestamp")
+    return problems
+
+
+def _check_unvalidated_raw_state(rid: str, record: DatasetAccessRecord) -> list[str]:
+    """No dataset other than the ds000030 pilot may carry raw-validation state."""
+    if record.raw_validation_completed:
+        return [f"{rid}: raw validation must not be completed for non-ds000030 datasets"]
+    empty = (
+        record.raw_validation_evidence_reference,
+        record.raw_validation_completed_at_utc,
+        record.raw_validation_error_count,
+        record.raw_validation_warning_count,
+        record.raw_validation_ignored_count,
+    )
+    if any(value is not None for value in empty):
+        return [f"{rid}: raw-validation fields must all be None without completed validation"]
+    return []
 
 
 def _check_raw_validation_tool() -> list[str]:
@@ -974,29 +1142,15 @@ def check(records: list[DatasetAccessRecord]) -> list[str]:
                 != DS000030_ACQUISITION_COMPLETED_AT
             ):
                 problems.append("ds000030: completed pilot acquisition evidence mismatch")
-            if not record.raw_validation_completed:
-                problems.append("ds000030: raw validation must be completed")
+            problems.extend(_check_ds000030_raw_validation(record))
+        else:
             if (
-                record.raw_validation_evidence_reference
-                != DS000030_RAW_VALIDATION_EVIDENCE_REFERENCE
+                record.independent_approval_verified
+                or record.independent_approval_reference is not None
+                or record.acquisition_permitted
             ):
-                problems.append("ds000030: raw validation evidence reference mismatch")
-            if record.raw_validation_error_count != 0:
-                problems.append("ds000030: raw validation must have zero errors")
-            if record.raw_validation_warning_count != 139:
-                problems.append("ds000030: raw validation warning count must be exactly 139")
-            if record.raw_validation_ignored_count != 0:
-                problems.append("ds000030: raw validation must have zero ignored")
-        elif (
-            record.independent_approval_verified
-            or record.independent_approval_reference is not None
-            or record.acquisition_permitted
-        ):
-            problems.append(f"{rid}: only ds000030 pilot is authorized for acquisition")
-        elif rid != "ds000030" and record.raw_validation_completed:
-            problems.append(
-                f"{rid}: raw validation must not be completed for non-ds000030 datasets"
-            )
+                problems.append(f"{rid}: only ds000030 pilot is authorized for acquisition")
+            problems.extend(_check_unvalidated_raw_state(rid, record))
 
     for rel, expected in HARDENED_EXECUTOR_FILE_SHA256.items():
         actual = hashlib.sha256((REPO_ROOT / rel).read_bytes()).hexdigest()

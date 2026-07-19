@@ -9,7 +9,7 @@ and are asserted against known real-identifier shapes in
 from __future__ import annotations
 
 import re
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -739,7 +739,7 @@ def test_governance_records_carry_scope_matched_evidence() -> None:
     assert ds.raw_validation_error_count == 0
     assert ds.raw_validation_warning_count == 139
     assert ds.raw_validation_ignored_count == 0
-    assert ds.raw_validation_evidence_reference == gov.DS000030_RAW_VALIDATION_EVIDENCE_REFERENCE
+    assert ds.raw_validation_evidence_reference == gov.DS000030_RAW_VALIDATION_REFERENCE
     assert records["cobre_niak"].storage_verified is False
     for rid, rec in records.items():
         if rid == "ds000030":
@@ -802,7 +802,7 @@ def test_raw_validation_evidence_must_be_opaque() -> None:
 
 
 def test_raw_validation_utc_timestamp_required() -> None:
-    with pytest.raises(ValidationError, match="timezone-aware"):
+    with pytest.raises(ValidationError, match=r"timezone-aware|timezone info"):
         DatasetAccessRecord(
             **_completed_acquisition_kwargs(
                 raw_validation_completed=True,
@@ -864,3 +864,216 @@ def test_raw_validation_incomplete_rejects_evidence() -> None:
                 raw_validation_evidence_reference="synthetic-raw-validation-sha256:x"
             )
         )
+
+
+# --- Raw-validation evidence chain -------------------------------------------
+#
+# The public evidence identity is the aggregate execution receipt; the detailed
+# report, validator output, and pre-validation snapshot stay supporting digests.
+# The ordering invariant is ``raw >= acquisition``: a validation completing in
+# the same instant as the acquisition it observes is accepted.
+
+
+def test_raw_validation_requires_permitted_acquisition() -> None:
+    with pytest.raises(ValidationError, match="acquisition_permitted"):
+        DatasetAccessRecord(
+            **_completed_acquisition_kwargs(acquisition_permitted=False, **_RAW_VALID_EVIDENCE)
+        )
+
+
+def test_raw_validation_requires_ready_access() -> None:
+    with pytest.raises(ValidationError, match=r"READY|manual_action|blocked"):
+        DatasetAccessRecord(
+            **_completed_acquisition_kwargs(
+                access_status=AccessStatus.AUTHORIZATION_PENDING,
+                required_manual_action="synthetic pending authorization",
+                **_RAW_VALID_EVIDENCE,
+            )
+        )
+
+
+def test_blocked_dataset_cannot_be_raw_validated() -> None:
+    with pytest.raises(ValidationError):
+        DatasetAccessRecord(
+            **_completed_acquisition_kwargs(
+                access_status=AccessStatus.BLOCKED,
+                required_manual_action="synthetic block",
+                **_RAW_VALID_EVIDENCE,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        None,
+        "",
+        "   ",
+        "synthetic raw validation:abc",
+        "synthetic-raw-validation-sha256:ab\tcd",
+        "synthetic/raw-validation-sha256:abc",
+        "synthetic\\raw-validation-sha256:abc",
+        "synthetic-raw-validation-sha256@abc",
+        "synthetic-raw-validation-sha256-abc",
+        "/home/synthetic/raw-validation.json",
+        "C:\\Users\\synthetic\\raw-validation.json",
+    ],
+    ids=[
+        "missing",
+        "blank",
+        "whitespace-only",
+        "embedded-space",
+        "embedded-tab",
+        "forward-slash",
+        "backslash",
+        "at-sign",
+        "no-namespace-separator",
+        "absolute-posix-home",
+        "absolute-windows-user",
+    ],
+)
+def test_raw_validation_rejects_non_opaque_evidence(reference: str | None) -> None:
+    with pytest.raises(ValidationError, match="evidence reference"):
+        DatasetAccessRecord(
+            **_completed_acquisition_kwargs(
+                **{**_RAW_VALID_EVIDENCE, "raw_validation_evidence_reference": reference}
+            )
+        )
+
+
+def test_raw_validation_rejects_non_utc_aware_timestamp() -> None:
+    with pytest.raises(ValidationError, match="UTC"):
+        DatasetAccessRecord(
+            **_completed_acquisition_kwargs(
+                **{
+                    **_RAW_VALID_EVIDENCE,
+                    "raw_validation_completed_at_utc": datetime(
+                        2026, 7, 19, tzinfo=timezone(timedelta(hours=5, minutes=30))
+                    ),
+                }
+            )
+        )
+
+
+def test_raw_validation_accepts_utc_timestamp() -> None:
+    record = DatasetAccessRecord(**_completed_acquisition_kwargs(**_RAW_VALID_EVIDENCE))
+    assert record.raw_validation_completed_at_utc == datetime(2026, 7, 19, tzinfo=UTC)
+
+
+def test_raw_validation_cannot_precede_acquisition_completion() -> None:
+    with pytest.raises(ValidationError, match="before acquisition completion"):
+        DatasetAccessRecord(
+            **_completed_acquisition_kwargs(
+                **{
+                    **_RAW_VALID_EVIDENCE,
+                    "raw_validation_completed_at_utc": datetime(2026, 7, 17, tzinfo=UTC),
+                }
+            )
+        )
+
+
+def test_raw_validation_equal_to_acquisition_completion_is_accepted() -> None:
+    same = datetime(2026, 7, 18, tzinfo=UTC)
+    record = DatasetAccessRecord(
+        **_completed_acquisition_kwargs(
+            **{**_RAW_VALID_EVIDENCE, "raw_validation_completed_at_utc": same}
+        )
+    )
+    assert record.raw_validation_completed_at_utc == record.acquisition_completed_at_utc == same
+
+
+def test_raw_validation_requires_error_count() -> None:
+    with pytest.raises(ValidationError, match="all count fields"):
+        DatasetAccessRecord(
+            **_completed_acquisition_kwargs(
+                **{**_RAW_VALID_EVIDENCE, "raw_validation_error_count": None}
+            )
+        )
+
+
+def test_raw_validation_requires_ignored_count() -> None:
+    with pytest.raises(ValidationError, match="all count fields"):
+        DatasetAccessRecord(
+            **_completed_acquisition_kwargs(
+                **{**_RAW_VALID_EVIDENCE, "raw_validation_ignored_count": None}
+            )
+        )
+
+
+@pytest.mark.parametrize("warnings", [0, 139])
+def test_raw_validation_accepts_nonnegative_warning_counts(warnings: int) -> None:
+    record = DatasetAccessRecord(
+        **_completed_acquisition_kwargs(
+            **{**_RAW_VALID_EVIDENCE, "raw_validation_warning_count": warnings}
+        )
+    )
+    assert record.raw_validation_warning_count == warnings
+
+
+def test_raw_validation_rejects_negative_warning_count() -> None:
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        DatasetAccessRecord(
+            **_completed_acquisition_kwargs(
+                **{**_RAW_VALID_EVIDENCE, "raw_validation_warning_count": -1}
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("raw_validation_evidence_reference", "synthetic-raw-validation-sha256:abc"),
+        ("raw_validation_completed_at_utc", datetime(2026, 7, 19, tzinfo=UTC)),
+        ("raw_validation_error_count", 0),
+        ("raw_validation_warning_count", 0),
+        ("raw_validation_ignored_count", 0),
+    ],
+)
+def test_incomplete_raw_validation_rejects_each_field(field: str, value: Any) -> None:
+    with pytest.raises(ValidationError, match="incomplete raw validation"):
+        DatasetAccessRecord(**_completed_acquisition_kwargs(**{field: value}))
+
+
+def test_assignment_cannot_leave_an_inconsistent_completed_record() -> None:
+    """Every mutation re-runs the full invariant set, so no assignment can
+    silently produce a completed record that violates the evidence chain.
+
+    Pydantic raises on the offending assignment but does not roll the field
+    back, so each case uses a fresh record rather than asserting a rollback.
+    """
+    for field, value in (
+        ("raw_validation_error_count", 3),
+        ("raw_validation_ignored_count", 1),
+        ("raw_validation_evidence_reference", "path/to/evidence"),
+        ("raw_validation_completed_at_utc", datetime(2026, 7, 17, tzinfo=UTC)),
+        ("acquisition_completed", False),
+    ):
+        record = DatasetAccessRecord(**_completed_acquisition_kwargs(**_RAW_VALID_EVIDENCE))
+        with pytest.raises(ValidationError):
+            setattr(record, field, value)
+
+
+def test_canonical_reference_is_the_execution_receipt() -> None:
+    """The public reference carries the aggregate receipt digest, not the report."""
+    gov = _load_governance_validator()
+    receipt_digest = gov.DS000030_RAW_VALIDATION_RECEIPT_SHA256
+    assert gov.DS000030_RAW_VALIDATION_REFERENCE.startswith("ds000030-pilot-raw-validation-sha256:")
+    assert gov.DS000030_RAW_VALIDATION_REFERENCE.endswith(receipt_digest)
+    assert gov.DS000030_RAW_VALIDATION_RECEIPT_SHA256 != gov.DS000030_RAW_VALIDATION_REPORT_SHA256
+    assert gov.DS000030_RAW_VALIDATION_RECEIPT_SHA256 != gov.DS000030_RAW_VALIDATOR_OUTPUT_SHA256
+    assert gov.DS000030_RAW_VALIDATION_RECEIPT_SHA256 != gov.DS000030_PRE_VALIDATION_SNAPSHOT_SHA256
+    assert sum(gov.DS000030_WARNING_COUNTS.values()) == 139
+    ds = {r.dataset_id: r for r in gov.required_records()}["ds000030"]
+    assert ds.raw_validation_evidence_reference == gov.DS000030_RAW_VALIDATION_REFERENCE
+
+
+@pytest.mark.parametrize("dataset_id", ["abide_i_pcp", "cobre_niak"])
+def test_other_datasets_carry_no_raw_validation_state(dataset_id: str) -> None:
+    gov = _load_governance_validator()
+    record = {r.dataset_id: r for r in gov.required_records()}[dataset_id]
+    assert record.raw_validation_completed is False
+    assert record.raw_validation_evidence_reference is None
+    assert record.raw_validation_completed_at_utc is None
+    assert record.raw_validation_error_count is None
+    assert record.raw_validation_warning_count is None
+    assert record.raw_validation_ignored_count is None

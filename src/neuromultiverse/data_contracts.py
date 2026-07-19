@@ -21,7 +21,7 @@ subject-manifest model is a schema for a future manifest, not a manifest.
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, Literal
 
@@ -147,6 +147,27 @@ def _reject_home_paths(value: str, field: str) -> str:
     return value
 
 
+def _require_opaque_reference(value: str | None, field: str) -> str:
+    """Validate an opaque, namespaced evidence reference.
+
+    An evidence reference is a public *identity* token, never a locator. It
+    therefore carries no path separator, no whitespace, and no address-like
+    ``@``, and it must be namespaced (``namespace:digest``) so that a bare
+    digest can never masquerade as a fully qualified reference.
+    """
+    if not (value and value.strip()):
+        raise ValueError(f"{field} requires a nonblank opaque evidence reference")
+    if (
+        any(character.isspace() for character in value)
+        or "/" in value
+        or "\\" in value
+        or "@" in value
+        or ":" not in value
+    ):
+        raise ValueError(f"{field} must be an opaque evidence reference")
+    return _reject_home_paths(value, field)
+
+
 class DatasetAccessRecord(BaseModel):
     """Governance record for one dataset's access terms and acquisition gate."""
 
@@ -234,7 +255,7 @@ class DatasetAccessRecord(BaseModel):
     # is true; all None/False otherwise.
     raw_validation_completed: bool = False
     raw_validation_evidence_reference: str | None = None
-    raw_validation_completed_at_utc: datetime | None = None
+    raw_validation_completed_at_utc: AwareDatetime | None = None
     raw_validation_error_count: NonNegativeInt | None = None
     raw_validation_warning_count: NonNegativeInt | None = None
     raw_validation_ignored_count: NonNegativeInt | None = None
@@ -403,9 +424,7 @@ class DatasetAccessRecord(BaseModel):
         if self.acquisition_completed:
             if not self.acquisition_permitted:
                 raise ValueError("acquisition_completed requires acquisition_permitted")
-            if not (evidence and evidence.strip()) or "/" in evidence or "\\" in evidence:
-                raise ValueError("completed acquisition requires an opaque evidence reference")
-            _reject_home_paths(evidence, "acquisition_evidence_reference")
+            _require_opaque_reference(evidence, "acquisition_evidence_reference")
             if completed_at is None or completed_at.utcoffset() is None:
                 raise ValueError("completed acquisition requires a timezone-aware completion time")
             if blocking:
@@ -424,15 +443,21 @@ class DatasetAccessRecord(BaseModel):
         if raw:
             if not self.acquisition_completed:
                 raise ValueError("raw_validation_completed requires acquisition_completed")
-            if (
-                not (raw_evidence and raw_evidence.strip())
-                or "/" in raw_evidence
-                or "\\" in raw_evidence
-            ):
-                raise ValueError("raw_validation requires an opaque evidence reference")
-            _reject_home_paths(raw_evidence, "raw_validation_evidence_reference")
-            if raw_completed_at is None or raw_completed_at.utcoffset() is None:
+            if not self.acquisition_permitted:
+                raise ValueError("raw_validation_completed requires acquisition_permitted")
+            if self.access_status is not AccessStatus.READY:
+                raise ValueError("raw_validation_completed requires READY access")
+            _require_opaque_reference(raw_evidence, "raw_validation_evidence_reference")
+            if raw_completed_at is None:
                 raise ValueError("raw_validation requires a timezone-aware completion time")
+            if raw_completed_at.utcoffset() != timedelta(0):
+                raise ValueError("raw_validation completion time must be UTC (zero offset)")
+            if completed_at is None:
+                raise ValueError("raw_validation requires an acquisition completion time")
+            # Validation observes an already-acquired tree, so it can never
+            # predate the acquisition it validates. Equal instants are accepted.
+            if raw_completed_at < completed_at:
+                raise ValueError("raw_validation cannot complete before acquisition completion")
             if raw_errors is None or raw_warnings is None or raw_ignored is None:
                 raise ValueError("raw_validation_completed requires all count fields")
             if raw_errors != 0:
