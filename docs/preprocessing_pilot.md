@@ -74,6 +74,86 @@ the private evidence. No selection has been made or generated here. A value
 containing a path separator, whitespace, `@`, a home path, or anything shaped
 like a BIDS subject entity is rejected.
 
+## Validating a filled plan
+
+Fill a copy of `configs/preprocessing/one_subject_pilot.template.yaml` **outside**
+the repository, then validate it without running anything:
+
+```powershell
+& '.venv\Scripts\python.exe' scripts\prepare_preprocessing_pilot.py --plan <external plan path>
+```
+
+Exit `0` means the plan is well formed and the accepted evidence still matches;
+exit `1` means it was rejected and lists why. The validator reads only the plan
+file. It never opens the FreeSurfer license, never lists an external root's
+contents, and never echoes an external path into its output — a path appears in
+the verdict only as a boolean about its shape.
+
+Validation fails closed unless `authorizes_execution` is false, the dataset is
+`ds000030` at scope `ds000030_pilot_5_subjects`, every accepted evidence
+identity matches, the selection reference is a valid opaque digest recorded
+outside Git, all three external roots are absolute and outside the repository,
+output spaces and CPU/memory limits are explicitly filled for all three
+pipelines, the fMRIPrep container reference and FreeSurfer license path are
+declared, every claim is false, and no expansion, acquisition, ABIDE, COBRE, or
+push authorization is asserted. A valid plan still authorizes nothing.
+
+## Recording the subject selection
+
+The selection is yours to make; this repository must never learn which subject
+it is. Run the following **outside Git**, against the external pilot plan, and
+return only the printed digest.
+
+1. Choose the selection deterministically from the five acquired subjects using
+   the project's frozen seed, so the choice is reproducible and not
+   result-driven: order the five acquired subject identifiers lexicographically
+   and take the one minimising
+   `SHA256("20260717|ds000030|1.0.0|one-subject-pilot-v1|<subject id>")`.
+   This mirrors the selection rule already used for the five-subject pilot, with
+   its own version label, so it cannot collide with that earlier draw.
+2. Write an external selection record at mode 600, outside Git, containing the
+   selected identifier, the rule version, the seed, the source plan digest, and
+   a UTC timestamp.
+3. Compute the reference as the SHA-256 over the record's canonical JSON
+   serialisation (`sort_keys=True`, `separators=(",", ":")`), matching how every
+   other receipt digest in this project is derived.
+4. Return only:
+
+   ```text
+   ds000030-one-subject-selection-sha256:<64 lowercase hex>
+   ```
+
+Print nothing else. The selected identifier must not reach stdout, a log, a
+commit, a plan committed to Git, or a message to me. I have not run this
+procedure, have not selected a subject, and cannot verify the digest's preimage
+— by design, the gate checks only its shape.
+
+## Output-space strategy — recommendation, not a decision
+
+Choosing output spaces is a scientific decision, so the plan template leaves the
+fields empty and validation only insists they be filled. Recording the rationale
+before execution is what keeps the later comparison honest.
+
+The comparison question is whether independent implementations agree given
+identical raw inputs. That argues for **holding the target space fixed across
+all three pipelines** and letting the pipelines differ only in how they get
+there. If each tool writes to its own preferred template, any disagreement you
+observe confounds the pipeline with the resampling target, and the result
+becomes uninterpretable.
+
+Two defensible options:
+
+| Option | Setup | Trade-off |
+| --- | --- | --- |
+| Common target (recommended) | `MNI152NLin2009cAsym:res-2` for all three | Isolates pipeline effects; requires configuring FSL and AFNI to a non-default target, so some of the difference you measure is configuration effort, not tool behaviour |
+| Native defaults | fMRIPrep `MNI152NLin2009cAsym`, FSL `MNI152NLin6Asym`, AFNI its default | Measures each tool as typically used; disagreement then mixes pipeline and template effects and needs a resampling stage before any comparison |
+
+My recommendation is the common target at `MNI152NLin2009cAsym:res-2`, with the
+native-default run recorded as a documented deviation if you later want the
+as-typically-used view. But the protocol governs this, and it is your call —
+tell me which you want and I will record it in the plan and the deviation log if
+needed. Nothing in the code chooses for you.
+
 ## What must stay outside Git
 
 Raw imaging data, derivatives, external manifests, receipts, validator output,

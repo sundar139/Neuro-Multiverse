@@ -15,6 +15,15 @@ kind: one-subject-preprocessing-plan
 authorizes_execution: false
 preparation_only: true
 
+# Nothing beyond the bounded pilot is authorized. Dry-run validation refuses a
+# plan that leaves any of these true or absent.
+prohibitions:
+  expansion: false
+  abide_acquisition: false
+  cobre_acquisition: false
+  acquisition: false
+  push: false
+
 dataset:
   accession: ds000030
   snapshot: "1.0.0"
@@ -50,6 +59,10 @@ external_paths:
   raw_root: ""
   derivatives_root: ""
   work_root: ""
+
+# Absolute path to the FreeSurfer license, outside the repository. Validation
+# checks that this is declared and well shaped; it never opens the file.
+freesurfer_license_path: ""
 
 # The same single subject and the same raw inputs go through all three
 # implementations so the comparison is about the pipeline, not the input.

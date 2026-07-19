@@ -11,20 +11,27 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import pytest
+import yaml
 
 from neuromultiverse.data_contracts import AccessStatus, DatasetAccessRecord
 from neuromultiverse.preprocessing_readiness import (
     DS000030_ACQUISITION_REFERENCE,
+    DS000030_BIDS_SCHEMA_VERSION,
+    DS000030_PERMISSION_REFERENCE,
     DS000030_RAW_VALIDATION_REFERENCE,
+    DS000030_VALIDATOR_IMAGE,
+    DS000030_VALIDATOR_VERSION,
     PIPELINES,
     SELECTION_REFERENCE_PREFIX,
     evaluate_preprocessing_readiness,
+    validate_execution_plan,
     validate_subject_selection_reference,
 )
 
@@ -270,9 +277,18 @@ def test_preparation_code_cannot_spawn_a_process() -> None:
             elif isinstance(node, ast.Call):
                 name = node.func.attr if isinstance(node.func, ast.Attribute) else None
                 assert name not in forbidden_calls, f"{path.name} calls {name}"
-    source = _PREFLIGHT.read_text(encoding="utf-8") + _READINESS_MODULE.read_text(encoding="utf-8")
-    for tool in ("fmriprep", "afni_proc.py", "flirt", "mcflirt", "3dTproject", "docker"):
-        assert f"{tool} " not in source.replace("fmriprep, fsl, afni", "")
+    # No string literal may look like an invocation of a preprocessing tool.
+    # Checked against literals rather than raw text so that a variable named
+    # after a pipeline is not mistaken for a command line.
+    invocations = ("fmriprep ", "afni_proc.py ", "flirt ", "mcflirt ", "3dTproject ", "docker ")
+    for path in (_READINESS_MODULE, _PREFLIGHT):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                lowered = node.value.lower()
+                for invocation in invocations:
+                    assert invocation not in lowered, f"{path.name}: {invocation!r} in a literal"
+            assert not (isinstance(node, ast.Constant) and node.value == "--network=none"), path
 
 
 def test_readiness_gate_reads_no_external_evidence(tmp_path: Path) -> None:
@@ -383,3 +399,280 @@ def test_governance_validator_shares_the_accepted_evidence_identities() -> None:
     assert ds.raw_validation_completed_at_utc is not None
     assert ds.raw_validation_completed_at_utc >= ds.acquisition_completed_at_utc
     assert ds.raw_validation_completed_at_utc > datetime(2026, 1, 1, tzinfo=UTC)
+
+
+# --- execution-plan dry-run validation ----------------------------------------
+
+
+def _filled_plan(tmp_path: Path, **overrides: Any) -> dict[str, Any]:
+    """A synthetic filled plan. Roots point at a temporary tree, never raw data."""
+    external = tmp_path / "external"
+    for name in ("raw", "derivatives", "work"):
+        (external / name).mkdir(parents=True, exist_ok=True)
+        if os.name == "posix":
+            (external / name).chmod(0o700)
+    license_path = external / "license.txt"
+    license_path.write_text("synthetic-not-a-real-license\n", encoding="utf-8")
+    plan: dict[str, Any] = {
+        "schema_version": "1",
+        "kind": "one-subject-preprocessing-plan",
+        "authorizes_execution": False,
+        "preparation_only": True,
+        "prohibitions": {
+            "expansion": False,
+            "abide_acquisition": False,
+            "cobre_acquisition": False,
+            "acquisition": False,
+            "push": False,
+        },
+        "dataset": {
+            "accession": "ds000030",
+            "snapshot": "1.0.0",
+            "doi": "10.18112/openneuro.ds000030.v1.0.0",
+            "acquisition_scope_id": "ds000030_pilot_5_subjects",
+        },
+        "accepted_evidence": {
+            "acquisition_reference": DS000030_ACQUISITION_REFERENCE,
+            "raw_validation_reference": DS000030_RAW_VALIDATION_REFERENCE,
+            "permission_reference": DS000030_PERMISSION_REFERENCE,
+            "validator_image": DS000030_VALIDATOR_IMAGE,
+            "validator_version": DS000030_VALIDATOR_VERSION,
+            "bids_schema_version": DS000030_BIDS_SCHEMA_VERSION,
+            "validated_file_count": 22,
+            "validated_total_bytes": 187570603,
+            "raw_validation_error_count": 0,
+            "raw_validation_warning_count": 139,
+            "raw_validation_ignored_count": 0,
+        },
+        "subject_selection": {"reference": _VALID_SELECTION, "recorded_outside_git": True},
+        "external_paths": {
+            "raw_root": str(external / "raw"),
+            "derivatives_root": str(external / "derivatives"),
+            "work_root": str(external / "work"),
+        },
+        "freesurfer_license_path": str(license_path),
+        "pipelines": {
+            "fmriprep": {
+                "enabled": True,
+                "container_reference": "nipreps/fmriprep:25.2.5",
+                "output_spaces": ["MNI152NLin2009cAsym:res-2"],
+                "resource_limits": {"cpus": 6, "memory_gb": 16},
+            },
+            "fsl": {
+                "enabled": True,
+                "output_spaces": ["MNI152NLin6Asym:res-2"],
+                "resource_limits": {"cpus": 6, "memory_gb": 16},
+            },
+            "afni": {
+                "enabled": True,
+                "output_spaces": ["MNI152NLin2009cAsym:res-2"],
+                "resource_limits": {"cpus": 6, "memory_gb": 16},
+            },
+        },
+        "claims": {
+            "scientific_results": False,
+            "pipeline_agreement": False,
+            "preprocessing_success": False,
+        },
+    }
+    plan.update(overrides)
+    return plan
+
+
+def test_filled_plan_passes_dry_run_validation(tmp_path: Path) -> None:
+    result = validate_execution_plan(_filled_plan(tmp_path), repository_root=_REPO_ROOT)
+    assert result.valid is True, result.blocking_issues
+    assert result.blocking_issues == []
+    assert result.mode == "dry-run"
+    assert result.preprocessing_executed is False
+    assert result.freesurfer_license_contents_read is False
+    assert result.external_roots_outside_repository is True
+    assert result.output_spaces_declared == {"fmriprep": 1, "fsl": 1, "afni": 1}
+    assert result.resource_limits_declared == {"fmriprep": True, "fsl": True, "afni": True}
+
+
+def test_unfilled_template_is_rejected() -> None:
+    """The committed template is not a runnable plan: it must fail validation."""
+    plan = yaml.safe_load(_PLAN_TEMPLATE.read_text(encoding="utf-8"))
+    result = validate_execution_plan(plan, repository_root=_REPO_ROOT)
+    assert result.valid is False
+    joined = " ".join(result.blocking_issues)
+    assert "output_spaces" in joined
+    assert "resource_limits" in joined
+    assert "subject_selection_reference" in joined
+
+
+@pytest.mark.parametrize(
+    "mutation, expected",
+    [
+        ({"authorizes_execution": True}, "authorizes_execution must be false"),
+        ({"preparation_only": False}, "preparation_only must be true"),
+        ({"authorizes_push": True}, "authorizes_push"),
+        ({"authorizes_expansion": True}, "authorizes_expansion"),
+        ({"authorizes_acquisition": True}, "authorizes_acquisition"),
+    ],
+    ids=["execution", "preparation", "push", "expansion", "acquisition"],
+)
+def test_plan_rejects_asserted_authorization(
+    tmp_path: Path, mutation: dict[str, Any], expected: str
+) -> None:
+    result = validate_execution_plan(_filled_plan(tmp_path, **mutation), repository_root=_REPO_ROOT)
+    assert result.valid is False
+    assert any(expected in issue for issue in result.blocking_issues)
+
+
+@pytest.mark.parametrize(
+    "key", ["expansion", "abide_acquisition", "cobre_acquisition", "acquisition", "push"]
+)
+def test_plan_rejects_a_relaxed_prohibition(tmp_path: Path, key: str) -> None:
+    plan = _filled_plan(tmp_path)
+    plan["prohibitions"][key] = True
+    result = validate_execution_plan(plan, repository_root=_REPO_ROOT)
+    assert result.valid is False
+    assert any(f"prohibitions.{key}" in issue for issue in result.blocking_issues)
+
+
+@pytest.mark.parametrize(
+    "section, key, value, expected",
+    [
+        ("dataset", "accession", "abide_i_pcp", "dataset.accession"),
+        ("dataset", "acquisition_scope_id", "ds000030_controlled_20", "acquisition_scope_id"),
+        ("accepted_evidence", "acquisition_reference", "x:" + "0" * 64, "acquisition_reference"),
+        (
+            "accepted_evidence",
+            "raw_validation_reference",
+            "x:" + "0" * 64,
+            "raw_validation_reference",
+        ),
+        ("accepted_evidence", "permission_reference", "x:" + "0" * 64, "permission_reference"),
+        ("accepted_evidence", "raw_validation_warning_count", 138, "warning_count"),
+        ("accepted_evidence", "raw_validation_error_count", 1, "error_count"),
+        ("accepted_evidence", "validated_total_bytes", 1, "validated_total_bytes"),
+        ("subject_selection", "reference", "sub-SYNTH01", "subject_selection_reference"),
+        ("subject_selection", "recorded_outside_git", False, "recorded_outside_git"),
+    ],
+)
+def test_plan_rejects_a_broken_field(
+    tmp_path: Path, section: str, key: str, value: Any, expected: str
+) -> None:
+    plan = _filled_plan(tmp_path)
+    plan[section][key] = value
+    result = validate_execution_plan(plan, repository_root=_REPO_ROOT)
+    assert result.valid is False
+    assert any(expected in issue for issue in result.blocking_issues)
+
+
+@pytest.mark.parametrize("root", ["raw_root", "derivatives_root", "work_root"])
+def test_plan_rejects_an_external_root_inside_the_repository(tmp_path: Path, root: str) -> None:
+    plan = _filled_plan(tmp_path)
+    plan["external_paths"][root] = str(_REPO_ROOT / "data" / "raw")
+    result = validate_execution_plan(plan, repository_root=_REPO_ROOT)
+    assert result.valid is False
+    assert any("outside the repository" in issue for issue in result.blocking_issues)
+    assert result.external_roots_outside_repository is False
+
+
+@pytest.mark.parametrize("root", ["raw_root", "derivatives_root", "work_root"])
+def test_plan_rejects_a_relative_external_root(tmp_path: Path, root: str) -> None:
+    plan = _filled_plan(tmp_path)
+    plan["external_paths"][root] = "relative/path"
+    result = validate_execution_plan(plan, repository_root=_REPO_ROOT)
+    assert result.valid is False
+    assert any("absolute path" in issue for issue in result.blocking_issues)
+
+
+@pytest.mark.parametrize("pipeline", ["fmriprep", "fsl", "afni"])
+def test_plan_requires_explicit_output_spaces(tmp_path: Path, pipeline: str) -> None:
+    plan = _filled_plan(tmp_path)
+    plan["pipelines"][pipeline]["output_spaces"] = []
+    result = validate_execution_plan(plan, repository_root=_REPO_ROOT)
+    assert result.valid is False
+    assert any(f"pipelines.{pipeline}.output_spaces" in i for i in result.blocking_issues)
+
+
+@pytest.mark.parametrize("pipeline", ["fmriprep", "fsl", "afni"])
+@pytest.mark.parametrize("limits", [{"cpus": None, "memory_gb": 16}, {"cpus": 6}, {}])
+def test_plan_requires_explicit_resource_limits(
+    tmp_path: Path, pipeline: str, limits: dict[str, Any]
+) -> None:
+    plan = _filled_plan(tmp_path)
+    plan["pipelines"][pipeline]["resource_limits"] = limits
+    result = validate_execution_plan(plan, repository_root=_REPO_ROOT)
+    assert result.valid is False
+    assert any(f"pipelines.{pipeline}.resource_limits" in i for i in result.blocking_issues)
+
+
+def test_plan_requires_a_container_reference(tmp_path: Path) -> None:
+    plan = _filled_plan(tmp_path)
+    plan["pipelines"]["fmriprep"]["container_reference"] = ""
+    result = validate_execution_plan(plan, repository_root=_REPO_ROOT)
+    assert result.valid is False
+    assert any("container_reference" in issue for issue in result.blocking_issues)
+
+
+@pytest.mark.parametrize("value", ["", "relative/license.txt"])
+def test_plan_requires_a_well_shaped_license_path(tmp_path: Path, value: str) -> None:
+    result = validate_execution_plan(
+        _filled_plan(tmp_path, freesurfer_license_path=value), repository_root=_REPO_ROOT
+    )
+    assert result.valid is False
+    assert any("freesurfer_license_path" in issue for issue in result.blocking_issues)
+    assert result.freesurfer_license_declared is False
+
+
+def test_plan_validation_never_reads_the_license(tmp_path: Path, monkeypatch: Any) -> None:
+    """A read of the declared license file must never happen during validation."""
+    plan = _filled_plan(tmp_path)
+    license_path = Path(plan["freesurfer_license_path"])
+    opened: list[str] = []
+    real_open = Path.open
+
+    def tracking_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+        opened.append(str(self))
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+    monkeypatch.setattr(
+        Path, "read_text", lambda self, *a, **k: pytest.fail(f"read_text called on {self.name}")
+    )
+    result = validate_execution_plan(plan, repository_root=_REPO_ROOT)
+    assert result.valid is True, result.blocking_issues
+    assert str(license_path) not in opened
+
+
+def test_plan_rejects_a_claim_of_success(tmp_path: Path) -> None:
+    plan = _filled_plan(tmp_path)
+    plan["claims"]["preprocessing_success"] = True
+    result = validate_execution_plan(plan, repository_root=_REPO_ROOT)
+    assert result.valid is False
+    assert any("claims" in issue for issue in result.blocking_issues)
+
+
+def test_plan_verdict_discloses_no_external_path(tmp_path: Path) -> None:
+    plan = _filled_plan(tmp_path)
+    result = validate_execution_plan(plan, repository_root=_REPO_ROOT)
+    rendered = repr(result.model_dump())
+    for secret in (
+        plan["external_paths"]["raw_root"],
+        plan["external_paths"]["derivatives_root"],
+        plan["freesurfer_license_path"],
+    ):
+        assert secret not in rendered
+    assert "sub-" not in rendered
+
+
+def test_plan_validation_does_not_traverse_the_external_roots(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Validation stats the roots themselves and never lists their contents."""
+
+    def _forbid(name: str) -> Any:
+        def guard(self: Path, *args: Any, **kwargs: Any) -> Any:
+            pytest.fail(f"{name} called during plan validation")
+
+        return guard
+
+    for attribute in ("iterdir", "glob", "rglob", "walk"):
+        monkeypatch.setattr(Path, attribute, _forbid(attribute), raising=False)
+    result = validate_execution_plan(_filled_plan(tmp_path), repository_root=_REPO_ROOT)
+    assert result.valid is True, result.blocking_issues

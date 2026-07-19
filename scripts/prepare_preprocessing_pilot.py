@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -32,8 +34,10 @@ from neuromultiverse.ds000030_pilot import DS000030_ACCESSION  # noqa: E402
 from neuromultiverse.preprocessing_readiness import (  # noqa: E402
     PIPELINES,
     SELECTION_REFERENCE_PREFIX,
+    PlanValidation,
     PreprocessingReadiness,
     evaluate_preprocessing_readiness,
+    validate_execution_plan,
 )
 
 GOVERNANCE_VALIDATOR = REPO_ROOT / "scripts" / "verify_data_governance.py"
@@ -83,6 +87,36 @@ def summarize(readiness: PreprocessingReadiness) -> dict[str, Any]:
     }
 
 
+def _load_plan(path: Path) -> dict[str, Any]:
+    """Parse the external plan. Only this one file is read."""
+    if not path.is_file():
+        raise SystemExit("the execution plan is not a readable file at the supplied location")
+    parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(parsed, dict):
+        raise SystemExit("the execution plan must parse to a mapping")
+    return parsed
+
+
+def summarize_plan(validation: PlanValidation) -> dict[str, Any]:
+    """The printable plan verdict. Paths appear only as booleans."""
+    return {
+        "mode": validation.mode,
+        "preprocessing_executed": validation.preprocessing_executed,
+        "plan_valid": validation.valid,
+        "dataset_accession": validation.dataset_accession,
+        "acquisition_scope_id": validation.acquisition_scope_id,
+        "subject_selection_reference": validation.subject_selection_reference,
+        "external_roots_outside_repository": validation.external_roots_outside_repository,
+        "output_spaces_declared": validation.output_spaces_declared,
+        "resource_limits_declared": validation.resource_limits_declared,
+        "freesurfer_license_declared": validation.freesurfer_license_declared,
+        "freesurfer_license_contents_read": validation.freesurfer_license_contents_read,
+        "fmriprep_container_declared": validation.fmriprep_container_declared,
+        "advisories": validation.advisories,
+        "blocking_issues": validation.blocking_issues,
+    }
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument(
@@ -103,6 +137,15 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="assert the broader controlled subset is authorized (it is not; this must fail)",
     )
+    result.add_argument(
+        "--plan",
+        type=Path,
+        default=None,
+        help=(
+            "path to a filled execution plan outside the repository; validates it in dry-run "
+            "mode. No pipeline, container, or raw file is touched either way."
+        ),
+    )
     return result
 
 
@@ -120,6 +163,25 @@ def main(argv: list[str] | None = None) -> int:
             f"({len(readiness.blocking_issues)} blocking issue(s))"
         )
         return 1
+
+    if args.plan is not None:
+        validation = validate_execution_plan(
+            _load_plan(args.plan), repository_root=REPO_ROOT, mode="dry-run"
+        )
+        print(json.dumps(summarize_plan(validation), indent=2, sort_keys=True))
+        if not validation.valid:
+            print(
+                "RESULT: PLAN REJECTED — dry-run validation failed "
+                f"({len(validation.blocking_issues)} blocking issue(s)). Nothing was executed."
+            )
+            return 1
+        print(
+            "RESULT: PLAN VALID (DRY RUN) — no preprocessing was run. "
+            f"Execution across {', '.join(PIPELINES)} still requires separate explicit "
+            "authorization."
+        )
+        return 0
+
     print(
         "RESULT: READY TO PREPARE — no preprocessing was run. "
         f"Execution across {', '.join(PIPELINES)} still requires separate explicit authorization."
