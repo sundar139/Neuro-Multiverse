@@ -474,6 +474,12 @@ def _filled_plan(tmp_path: Path, **overrides: Any) -> dict[str, Any]:
             "pipeline_agreement": False,
             "preprocessing_success": False,
         },
+        "authorization": {
+            "granted": False,
+            "granted_by": "",
+            "granted_at_utc": "",
+            "reference": "",
+        },
     }
     plan.update(overrides)
     return plan
@@ -517,6 +523,52 @@ def test_plan_rejects_asserted_authorization(
     tmp_path: Path, mutation: dict[str, Any], expected: str
 ) -> None:
     result = validate_execution_plan(_filled_plan(tmp_path, **mutation), repository_root=_REPO_ROOT)
+    assert result.valid is False
+    assert any(expected in issue for issue in result.blocking_issues)
+
+
+def test_plan_requires_an_authorization_block(tmp_path: Path) -> None:
+    plan = _filled_plan(tmp_path)
+    del plan["authorization"]
+    result = validate_execution_plan(plan, repository_root=_REPO_ROOT)
+    assert result.valid is False
+    assert any("authorization must be declared" in issue for issue in result.blocking_issues)
+
+
+def test_empty_dry_run_authorization_block_passes(tmp_path: Path) -> None:
+    """The template's own empty block is the only shape dry-run validation accepts."""
+    plan = _filled_plan(tmp_path)
+    assert plan["authorization"] == {
+        "granted": False,
+        "granted_by": "",
+        "granted_at_utc": "",
+        "reference": "",
+    }
+    result = validate_execution_plan(plan, repository_root=_REPO_ROOT)
+    assert result.valid is True, result.blocking_issues
+
+
+@pytest.mark.parametrize(
+    "field, value, expected",
+    [
+        ("granted", True, "authorization.granted must be false"),
+        ("granted", None, "authorization.granted must be false"),
+        ("granted_by", "a reviewer", "authorization.granted_by must be empty"),
+        ("granted_at_utc", "2026-07-19T00:00:00Z", "authorization.granted_at_utc must be empty"),
+        ("reference", "nm-authorization-001", "authorization.reference must be empty"),
+    ],
+    ids=["granted-true", "granted-absent", "granted-by", "granted-at", "reference"],
+)
+def test_plan_rejects_a_filled_authorization_block(
+    tmp_path: Path, field: str, value: Any, expected: str
+) -> None:
+    """A plan may not assert its own execution grant during dry-run validation."""
+    plan = _filled_plan(tmp_path)
+    if value is None:
+        del plan["authorization"][field]
+    else:
+        plan["authorization"][field] = value
+    result = validate_execution_plan(plan, repository_root=_REPO_ROOT)
     assert result.valid is False
     assert any(expected in issue for issue in result.blocking_issues)
 

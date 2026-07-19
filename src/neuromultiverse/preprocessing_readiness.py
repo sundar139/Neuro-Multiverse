@@ -398,6 +398,19 @@ def validate_execution_plan(
             if prohibitions.get(key) is not False:
                 issues.append(f"prohibitions.{key} must be declared false (not authorized)")
 
+    # A dry-run plan must carry an empty authorization block. A filled one would
+    # be a plan asserting its own execution grant, which is exactly what dry-run
+    # validation exists to refuse: a valid plan authorizes nothing.
+    authorization = plan.get("authorization")
+    if not isinstance(authorization, Mapping):
+        issues.append("authorization must be declared")
+    else:
+        if authorization.get("granted") is not False:
+            issues.append("authorization.granted must be false in dry-run validation")
+        for field in ("granted_by", "granted_at_utc", "reference"):
+            if authorization.get(field) != "":
+                issues.append(f"authorization.{field} must be empty in dry-run validation")
+
     dataset = plan.get("dataset")
     accession: str | None = None
     scope: str | None = None
