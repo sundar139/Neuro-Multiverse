@@ -229,6 +229,15 @@ class DatasetAccessRecord(BaseModel):
     acquisition_completed: bool = False
     acquisition_evidence_reference: str | None = None
     acquisition_completed_at_utc: datetime | None = None
+    # Raw validation (BIDS Validator + structural checks) after acquisition.
+    # All six fields are present together exactly when raw_validation_completed
+    # is true; all None/False otherwise.
+    raw_validation_completed: bool = False
+    raw_validation_evidence_reference: str | None = None
+    raw_validation_completed_at_utc: datetime | None = None
+    raw_validation_error_count: NonNegativeInt | None = None
+    raw_validation_warning_count: NonNegativeInt | None = None
+    raw_validation_ignored_count: NonNegativeInt | None = None
 
     @model_validator(mode="after")
     def _check_invariants(self) -> DatasetAccessRecord:
@@ -403,6 +412,35 @@ class DatasetAccessRecord(BaseModel):
                 raise ValueError("a completed acquisition cannot be attached to blocked access")
         elif evidence is not None or completed_at is not None:
             raise ValueError("incomplete acquisition cannot carry completion evidence")
+
+        # Raw validation is all-or-nothing and gated on completed acquisition.
+        raw = self.raw_validation_completed
+        raw_evidence = self.raw_validation_evidence_reference
+        raw_completed_at = self.raw_validation_completed_at_utc
+        raw_errors = self.raw_validation_error_count
+        raw_warnings = self.raw_validation_warning_count
+        raw_ignored = self.raw_validation_ignored_count
+        raw_fields = (raw_evidence, raw_completed_at, raw_errors, raw_warnings, raw_ignored)
+        if raw:
+            if not self.acquisition_completed:
+                raise ValueError("raw_validation_completed requires acquisition_completed")
+            if (
+                not (raw_evidence and raw_evidence.strip())
+                or "/" in raw_evidence
+                or "\\" in raw_evidence
+            ):
+                raise ValueError("raw_validation requires an opaque evidence reference")
+            _reject_home_paths(raw_evidence, "raw_validation_evidence_reference")
+            if raw_completed_at is None or raw_completed_at.utcoffset() is None:
+                raise ValueError("raw_validation requires a timezone-aware completion time")
+            if raw_errors is None or raw_warnings is None or raw_ignored is None:
+                raise ValueError("raw_validation_completed requires all count fields")
+            if raw_errors != 0:
+                raise ValueError("raw_validation requires zero errors when completed")
+            if raw_ignored != 0:
+                raise ValueError("raw_validation requires zero ignored when completed")
+        elif any(f is not None for f in raw_fields):
+            raise ValueError("incomplete raw validation cannot carry validation evidence")
         return self
 
 

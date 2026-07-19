@@ -90,12 +90,26 @@ DS000030_ACQUISITION_REFERENCE = (
     "e2b194394687738f62b199539cdc7acca6627b40fcd6a4fbb45143891b7410ea"
 )
 DS000030_ACQUISITION_COMPLETED_AT = "2026-07-18T07:34:41.416478Z"
+DS000030_RAW_VALIDATION_EVIDENCE_REFERENCE = (
+    "ds000030-pilot-raw-validation-sha256:"
+    "41c31c09f0fbacc0425f2847333d5e20fd70edec4811a2a251cf5c134c5822ec"
+)
+DS000030_RAW_VALIDATION_COMPLETED_AT = "2026-07-19T05:06:30.303343Z"
+DS000030_RAW_VALIDATOR_OUTPUT_SHA256 = (
+    "a7de9e4f9e345b3d78f24fccdf8cea5e2f30fe986914d8261b4624668b3f01e2"
+)
+DS000030_PRE_VALIDATION_SNAPSHOT_SHA256 = (
+    "3ff13abfcc62b385594b09cbfcefefd187701a72c448b38506d97d12c954cd6d"
+)
 HARDENED_EXECUTOR_FILE_SHA256 = {
     "scripts/acquire_ds000030_pilot.py": (
         "2cfd77aa546617aa4ddebbe41a71700e8f26848c06b4d048bea65eb1d95f0b96"
     ),
     "src/neuromultiverse/ds000030_pilot.py": (
         "159f1c4251c5eb81ed6be5a915485e19983977e4447834e006fa8f84ccb58d74"
+    ),
+    "scripts/validate_ds000030_pilot.py": (
+        "3fb69a0596db867850586f4ae2ebefdad6d79384ab270f4de4dc54137c80e60f"
     ),
 }
 
@@ -266,6 +280,12 @@ def required_records() -> list[DatasetAccessRecord]:
             acquisition_completed=True,
             acquisition_evidence_reference=DS000030_ACQUISITION_REFERENCE,
             acquisition_completed_at_utc=DS000030_ACQUISITION_COMPLETED_AT,
+            raw_validation_completed=True,
+            raw_validation_evidence_reference=DS000030_RAW_VALIDATION_EVIDENCE_REFERENCE,
+            raw_validation_completed_at_utc=DS000030_RAW_VALIDATION_COMPLETED_AT,
+            raw_validation_error_count=0,
+            raw_validation_warning_count=139,
+            raw_validation_ignored_count=0,
         ),
         DatasetAccessRecord(
             dataset_id="cobre_niak",
@@ -954,12 +974,29 @@ def check(records: list[DatasetAccessRecord]) -> list[str]:
                 != DS000030_ACQUISITION_COMPLETED_AT
             ):
                 problems.append("ds000030: completed pilot acquisition evidence mismatch")
+            if not record.raw_validation_completed:
+                problems.append("ds000030: raw validation must be completed")
+            if (
+                record.raw_validation_evidence_reference
+                != DS000030_RAW_VALIDATION_EVIDENCE_REFERENCE
+            ):
+                problems.append("ds000030: raw validation evidence reference mismatch")
+            if record.raw_validation_error_count != 0:
+                problems.append("ds000030: raw validation must have zero errors")
+            if record.raw_validation_warning_count != 139:
+                problems.append("ds000030: raw validation warning count must be exactly 139")
+            if record.raw_validation_ignored_count != 0:
+                problems.append("ds000030: raw validation must have zero ignored")
         elif (
             record.independent_approval_verified
             or record.independent_approval_reference is not None
             or record.acquisition_permitted
         ):
             problems.append(f"{rid}: only ds000030 pilot is authorized for acquisition")
+        elif rid != "ds000030" and record.raw_validation_completed:
+            problems.append(
+                f"{rid}: raw validation must not be completed for non-ds000030 datasets"
+            )
 
     for rel, expected in HARDENED_EXECUTOR_FILE_SHA256.items():
         actual = hashlib.sha256((REPO_ROOT / rel).read_bytes()).hexdigest()
@@ -1200,6 +1237,16 @@ def main() -> int:
                     if r.acquisition_completed_at_utc
                     else None
                 ),
+                "raw_validation_completed": r.raw_validation_completed,
+                "raw_validation_evidence_reference": r.raw_validation_evidence_reference,
+                "raw_validation_completed_at_utc": (
+                    r.raw_validation_completed_at_utc.isoformat()
+                    if r.raw_validation_completed_at_utc
+                    else None
+                ),
+                "raw_validation_error_count": r.raw_validation_error_count,
+                "raw_validation_warning_count": r.raw_validation_warning_count,
+                "raw_validation_ignored_count": r.raw_validation_ignored_count,
             }
             for r in records
         ],

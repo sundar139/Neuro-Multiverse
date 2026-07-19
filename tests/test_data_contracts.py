@@ -735,6 +735,11 @@ def test_governance_records_carry_scope_matched_evidence() -> None:
     assert ds.independent_approval_reference == gov.DS000030_APPROVAL_REFERENCE
     assert ds.acquisition_completed is True
     assert ds.acquisition_evidence_reference == gov.DS000030_ACQUISITION_REFERENCE
+    assert ds.raw_validation_completed is True
+    assert ds.raw_validation_error_count == 0
+    assert ds.raw_validation_warning_count == 139
+    assert ds.raw_validation_ignored_count == 0
+    assert ds.raw_validation_evidence_reference == gov.DS000030_RAW_VALIDATION_EVIDENCE_REFERENCE
     assert records["cobre_niak"].storage_verified is False
     for rid, rec in records.items():
         if rid == "ds000030":
@@ -744,3 +749,118 @@ def test_governance_records_carry_scope_matched_evidence() -> None:
         assert rec.independent_approval_reference is None
         assert rec.acquisition_completed is False
         assert rec.acquisition_evidence_reference is None
+        assert rec.raw_validation_completed is False
+        assert rec.raw_validation_evidence_reference is None
+
+
+def _completed_acquisition_kwargs(**overrides: Any) -> dict[str, Any]:
+    """Fixture with acquisition completed for raw-validation tests."""
+    base = _permittable_kwargs(
+        acquisition_completed=True,
+        acquisition_evidence_reference="synthetic-acquisition-sha256:" + "a" * 64,
+        acquisition_completed_at_utc=datetime(2026, 7, 18, tzinfo=UTC),
+    )
+    base.update(overrides)
+    return base
+
+
+_RAW_VALID_EVIDENCE = {
+    "raw_validation_completed": True,
+    "raw_validation_evidence_reference": "synthetic-raw-validation-sha256:" + "b" * 64,
+    "raw_validation_completed_at_utc": datetime(2026, 7, 19, tzinfo=UTC),
+    "raw_validation_error_count": 0,
+    "raw_validation_warning_count": 139,
+    "raw_validation_ignored_count": 0,
+}
+
+
+def test_raw_validation_completed_requires_acquisition() -> None:
+    with pytest.raises(ValidationError, match="requires acquisition_completed"):
+        DatasetAccessRecord(**_permittable_kwargs(**_RAW_VALID_EVIDENCE))
+
+
+def test_raw_validation_completed_with_all_fields() -> None:
+    record = DatasetAccessRecord(**_completed_acquisition_kwargs(**_RAW_VALID_EVIDENCE))
+    assert record.raw_validation_completed is True
+    assert record.raw_validation_error_count == 0
+    assert record.raw_validation_warning_count == 139
+    assert record.raw_validation_ignored_count == 0
+
+
+def test_raw_validation_evidence_must_be_opaque() -> None:
+    with pytest.raises(ValidationError, match="opaque evidence reference"):
+        DatasetAccessRecord(
+            **_completed_acquisition_kwargs(
+                raw_validation_completed=True,
+                raw_validation_evidence_reference="path/to/evidence",
+                raw_validation_completed_at_utc=datetime(2026, 7, 19, tzinfo=UTC),
+                raw_validation_error_count=0,
+                raw_validation_warning_count=0,
+                raw_validation_ignored_count=0,
+            )
+        )
+
+
+def test_raw_validation_utc_timestamp_required() -> None:
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        DatasetAccessRecord(
+            **_completed_acquisition_kwargs(
+                raw_validation_completed=True,
+                raw_validation_evidence_reference="synthetic-raw-validation-sha256:x",
+                raw_validation_completed_at_utc=datetime(2026, 7, 19),
+                raw_validation_error_count=0,
+                raw_validation_warning_count=0,
+                raw_validation_ignored_count=0,
+            )
+        )
+
+
+def test_raw_validation_requires_all_counts() -> None:
+    with pytest.raises(ValidationError, match="all count fields"):
+        DatasetAccessRecord(
+            **_completed_acquisition_kwargs(
+                raw_validation_completed=True,
+                raw_validation_evidence_reference="synthetic-raw-validation-sha256:x",
+                raw_validation_completed_at_utc=datetime(2026, 7, 19, tzinfo=UTC),
+                raw_validation_error_count=0,
+                raw_validation_warning_count=None,
+                raw_validation_ignored_count=0,
+            )
+        )
+
+
+def test_raw_validation_zero_errors_required() -> None:
+    with pytest.raises(ValidationError, match="zero errors"):
+        DatasetAccessRecord(
+            **_completed_acquisition_kwargs(
+                raw_validation_completed=True,
+                raw_validation_evidence_reference="synthetic-raw-validation-sha256:x",
+                raw_validation_completed_at_utc=datetime(2026, 7, 19, tzinfo=UTC),
+                raw_validation_error_count=2,
+                raw_validation_warning_count=0,
+                raw_validation_ignored_count=0,
+            )
+        )
+
+
+def test_raw_validation_zero_ignored_required() -> None:
+    with pytest.raises(ValidationError, match="zero ignored"):
+        DatasetAccessRecord(
+            **_completed_acquisition_kwargs(
+                raw_validation_completed=True,
+                raw_validation_evidence_reference="synthetic-raw-validation-sha256:x",
+                raw_validation_completed_at_utc=datetime(2026, 7, 19, tzinfo=UTC),
+                raw_validation_error_count=0,
+                raw_validation_warning_count=0,
+                raw_validation_ignored_count=1,
+            )
+        )
+
+
+def test_raw_validation_incomplete_rejects_evidence() -> None:
+    with pytest.raises(ValidationError, match="incomplete raw validation"):
+        DatasetAccessRecord(
+            **_completed_acquisition_kwargs(
+                raw_validation_evidence_reference="synthetic-raw-validation-sha256:x"
+            )
+        )
