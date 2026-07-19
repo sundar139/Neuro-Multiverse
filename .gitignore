@@ -65,6 +65,13 @@ scratch/
 results/
 artifacts/
 
+# Filled preprocessing plans and completed QC checklists are external evidence:
+# they carry an external data root, an opaque selection, and reviewer marks.
+# Only the templates are versioned.
+configs/preprocessing/*
+!configs/preprocessing/*.template.yaml
+!configs/preprocessing/*.template.md
+
 # Neuroimaging working directories and container payloads
 workdir/
 fmriprep_work/

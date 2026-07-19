@@ -55,6 +55,18 @@ from neuromultiverse.ds000030_pilot import (
     DS000030_PILOT_PLAN_REFERENCE,
     DS000030_STORAGE_REFERENCE,
 )
+from neuromultiverse.preprocessing_readiness import (
+    DS000030_ACQUISITION_REFERENCE,
+    DS000030_BIDS_SCHEMA_VERSION,
+    DS000030_PERMISSION_REFERENCE,
+    DS000030_RAW_VALIDATION_RECEIPT_SHA256,
+    DS000030_RAW_VALIDATION_REFERENCE,
+    DS000030_RAW_VALIDATION_WARNING_COUNT,
+    DS000030_VALIDATED_FILE_COUNT,
+    DS000030_VALIDATOR_IMAGE,
+    DS000030_VALIDATOR_VERSION,
+    DS000030_WARNING_COUNTS,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CITATION_INVENTORY = REPO_ROOT / "docs" / "citation_inventory.md"
@@ -85,26 +97,14 @@ DS000030_PLANNED_RQ5_SUBJECT_COUNT = 20
 # local to the preflight record.
 DS000030_STORAGE_AVAILABLE_BYTES = 996303314944
 DS000030_APPROVAL_REFERENCE = "nm-ds000030-pilot-20260718-chatgpt-audit-001"
-DS000030_ACQUISITION_REFERENCE = (
-    "ds000030-pilot-acquisition-sha256:"
-    "e2b194394687738f62b199539cdc7acca6627b40fcd6a4fbb45143891b7410ea"
-)
 DS000030_ACQUISITION_COMPLETED_AT = "2026-07-18T07:34:41.416478Z"
 # The public identity of the raw validation is the *aggregate execution
 # receipt*: the single artifact that binds the detailed report, the raw
 # validator output, the pre-validation snapshot, the permission receipt, and
-# the manifest into one decision. The supporting digests below each keep their
-# own role and are never promoted to the public evidence identity.
-DS000030_RAW_VALIDATION_RECEIPT_SHA256 = (
-    "b10cb77f6d2b8a5b3f9ca4154935b2d87eb2725d420f6e639d5bd9c0a9a51261"
-)
-DS000030_RAW_VALIDATION_REFERENCE = (
-    f"ds000030-pilot-raw-validation-sha256:{DS000030_RAW_VALIDATION_RECEIPT_SHA256}"
-)
-DS000030_PERMISSION_REFERENCE = (
-    "ds000030-pilot-permissions-sha256:"
-    "aeb62b14a73926783543311e3953a1542f2dde5f57cb1b9a7e0216407157680e"
-)
+# the manifest into one decision. That reference, the acquisition reference, and
+# the validator identity are imported above from the readiness module, which is
+# their single source of truth; the supporting digests below each keep their own
+# role and are never promoted to the public evidence identity.
 DS000030_RAW_VALIDATION_SOURCE_COMMIT = "8b61eca3197e56f6a18d2c7d2910dc4700871b17"
 DS000030_RAW_VALIDATION_COMPLETED_AT = "2026-07-19T05:06:30.303343Z"
 DS000030_RAW_VALIDATOR_OUTPUT_SHA256 = (
@@ -116,18 +116,6 @@ DS000030_RAW_VALIDATION_REPORT_SHA256 = (
 DS000030_PRE_VALIDATION_SNAPSHOT_SHA256 = (
     "3ff13abfcc62b385594b09cbfcefefd187701a72c448b38506d97d12c954cd6d"
 )
-DS000030_VALIDATOR_IMAGE = (
-    "bids/validator@sha256:8ef7bf22a5e62430c98c0f3e62627f400c62e85c20db3f691e370ddfdc9963c7"
-)
-DS000030_VALIDATOR_VERSION = "3.0.0"
-DS000030_BIDS_SCHEMA_VERSION = "1.2.4"
-DS000030_VALIDATED_FILE_COUNT = 22
-DS000030_RAW_VALIDATION_WARNING_COUNT = 139
-DS000030_WARNING_COUNTS = {
-    "JSON_KEY_RECOMMENDED": 3,
-    "SIDECAR_KEY_RECOMMENDED": 135,
-    "README_FILE_MISSING": 1,
-}
 HARDENED_EXECUTOR_FILE_SHA256 = {
     "scripts/acquire_ds000030_pilot.py": (
         "2cfd77aa546617aa4ddebbe41a71700e8f26848c06b4d048bea65eb1d95f0b96"

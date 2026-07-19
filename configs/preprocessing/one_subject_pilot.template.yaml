@@ -1,0 +1,103 @@
+# Execution-plan template for the future one-subject ds000030 preprocessing pilot.
+#
+# This file is a template and authorizes nothing. Copy it OUTSIDE the repository,
+# fill the empty fields there, and keep the filled copy out of Git: a completed
+# plan names an external data root and an opaque selection whose preimage is
+# private evidence.
+#
+# Every field below is either a fixed accepted fact or an empty value a later,
+# separately authorized unit fills in. No participant identifier, no raw path,
+# and no command line belongs in this file or in any copy of it that is
+# committed.
+
+schema_version: "1"
+kind: one-subject-preprocessing-plan
+authorizes_execution: false
+preparation_only: true
+
+dataset:
+  accession: ds000030
+  snapshot: "1.0.0"
+  doi: 10.18112/openneuro.ds000030.v1.0.0
+  acquisition_scope_id: ds000030_pilot_5_subjects
+
+# Accepted governance evidence. A later unit must re-verify these identities
+# before it may run anything; they are reproduced here so a filled plan is
+# self-describing.
+accepted_evidence:
+  acquisition_reference: ds000030-pilot-acquisition-sha256:e2b194394687738f62b199539cdc7acca6627b40fcd6a4fbb45143891b7410ea
+  raw_validation_reference: ds000030-pilot-raw-validation-sha256:b10cb77f6d2b8a5b3f9ca4154935b2d87eb2725d420f6e639d5bd9c0a9a51261
+  permission_reference: ds000030-pilot-permissions-sha256:aeb62b14a73926783543311e3953a1542f2dde5f57cb1b9a7e0216407157680e
+  validator_image: bids/validator@sha256:8ef7bf22a5e62430c98c0f3e62627f400c62e85c20db3f691e370ddfdc9963c7
+  validator_version: "3.0.0"
+  bids_schema_version: "1.2.4"
+  validated_file_count: 22
+  validated_total_bytes: 187570603
+  raw_validation_error_count: 0
+  raw_validation_warning_count: 139
+  raw_validation_ignored_count: 0
+
+# The one subject a later unit would process, named only by an opaque external
+# reference of the form ds000030-one-subject-selection-sha256:<64 lowercase hex>.
+# A participant identifier must never appear here.
+subject_selection:
+  reference: ""
+  recorded_outside_git: true
+
+# Filled outside Git. Both roots live under the external data root, never under
+# the repository, and neither path is committed.
+external_paths:
+  raw_root: ""
+  derivatives_root: ""
+  work_root: ""
+
+# The same single subject and the same raw inputs go through all three
+# implementations so the comparison is about the pipeline, not the input.
+pipelines:
+  fmriprep:
+    enabled: true
+    container_reference: nipreps/fmriprep:25.2.5
+    output_spaces: []
+    freesurfer_license_outside_git: true
+    resource_limits:
+      cpus: null
+      memory_gb: null
+  fsl:
+    enabled: true
+    version: 6.0.7.22
+    output_spaces: []
+    resource_limits:
+      cpus: null
+      memory_gb: null
+  afni:
+    enabled: true
+    version: AFNI_26.2.01
+    driver: afni_proc.py
+    output_spaces: []
+    resource_limits:
+      cpus: null
+      memory_gb: null
+
+# Recorded per pipeline during the later authorized run, for the manual review.
+review_targets:
+  registration: true
+  brain_extraction: true
+  susceptibility_correction_assumptions: true
+  output_space: true
+  voxel_size_and_template: true
+  confound_outputs: true
+  temporal_length: true
+  file_naming: true
+  runtime_and_resources: true
+
+# A completed run claims nothing beyond what was observed.
+claims:
+  scientific_results: false
+  pipeline_agreement: false
+  preprocessing_success: false
+
+authorization:
+  granted: false
+  granted_by: ""
+  granted_at_utc: ""
+  reference: ""
