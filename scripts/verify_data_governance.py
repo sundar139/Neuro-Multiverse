@@ -593,11 +593,11 @@ def _check_raw_validation_tool() -> list[str]:
         "_validate_metadata_text",
         "https?://",
         "urlsplit",
-        "_RESIDUAL_FORBIDDEN_RE",
-        '"file:"',
-        '"/home/"',
-        '"/Users/"',
-        '"~/"',
+        "RESIDUAL_FORBIDDEN_RE",
+        "file:)",
+        "|/home/|",
+        "/Users/",
+        "|~/",
     )
     for marker in required_markers:
         if marker not in source:
