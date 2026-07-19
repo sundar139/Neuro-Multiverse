@@ -1361,3 +1361,73 @@ def test_remote_home_path_passes(tmp_path: Path) -> None:
 
 def test_remote_users_path_passes(tmp_path: Path) -> None:
     _assert_strict_passes(tmp_path, {"Link": "https://example.invalid/Users/guide"})
+
+
+# Hostname validation tests for _validate_public_hostname.
+
+
+def test_ipv4_hostname_passes() -> None:
+    tool._validate_public_hostname("192.168.1.1")
+    tool._validate_public_hostname("10.0.0.1")
+    tool._validate_public_hostname("172.16.0.1")
+
+
+def test_ipv6_hostname_passes() -> None:
+    tool._validate_public_hostname("::1")
+    tool._validate_public_hostname("2001:db8::1")
+    tool._validate_public_hostname("fe80::1")
+
+
+def test_valid_dns_hostname_passes() -> None:
+    tool._validate_public_hostname("example.com")
+    tool._validate_public_hostname("subdomain.example.com")
+    tool._validate_public_hostname("xn--n1e1017a.example.com")
+
+
+def test_internationalized_hostname_passes() -> None:
+    tool._validate_public_hostname("münchen.de")
+
+
+def test_hostname_leading_hyphen_fails() -> None:
+    with pytest.raises(tool.ValidationError):
+        tool._validate_public_hostname("-example.com")
+
+
+def test_hostname_trailing_hyphen_fails() -> None:
+    with pytest.raises(tool.ValidationError):
+        tool._validate_public_hostname("example-.com")
+
+
+def test_hostname_label_too_long_fails() -> None:
+    with pytest.raises(tool.ValidationError):
+        tool._validate_public_hostname("a" * 64 + ".com")
+
+
+def test_hostname_too_long_fails() -> None:
+    with pytest.raises(tool.ValidationError):
+        tool._validate_public_hostname("a." * 127 + "b")
+
+
+def test_hostname_leading_dot_fails() -> None:
+    with pytest.raises(tool.ValidationError):
+        tool._validate_public_hostname(".example.com")
+
+
+def test_hostname_trailing_dot_fails() -> None:
+    with pytest.raises(tool.ValidationError):
+        tool._validate_public_hostname("example.com.")
+
+
+def test_hostname_empty_fails() -> None:
+    with pytest.raises(tool.ValidationError):
+        tool._validate_public_hostname("")
+
+
+def test_hostname_punctuation_only_fails() -> None:
+    with pytest.raises(tool.ValidationError):
+        tool._validate_public_hostname(",")
+
+
+def test_hostname_double_dot_fails() -> None:
+    with pytest.raises(tool.ValidationError):
+        tool._validate_public_hostname("a..b")

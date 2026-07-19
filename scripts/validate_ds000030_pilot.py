@@ -7,6 +7,7 @@ import argparse
 import dataclasses
 import gzip
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -141,6 +142,7 @@ RESIDUAL_FORBIDDEN_RE = re.compile(
     r"|://"  # non-http(s) scheme (file://, ...)
     r"|file:)"  # file: scheme
 )
+_HOST_LABEL_RE = re.compile(r"[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\Z")
 T1W_RE = re.compile(r"^(sub-[A-Za-z0-9]+)_T1w\.(nii\.gz|json)$")
 BOLD_RE = re.compile(r"^(sub-[A-Za-z0-9]+)_task-rest_bold\.(nii\.gz|json)$")
 
@@ -208,20 +210,31 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _validate_public_url(url: str) -> None:
-    """Accept a well-formed public HTTP(S) reference; reject everything else."""
-    if SECRET_RE.search(url):
-        raise ValidationError("metadata JSON contains prohibited secret or credential material")
-    if "\x00" in url or any(ord(char) < 0x20 for char in url):
+def _validate_public_hostname(hostname: str) -> None:
+    """Validate a hostname as a public IP literal or RFC-compliant DNS name."""
+    if not hostname:
         raise ValidationError("metadata JSON contains a malformed URI")
-    parsed = urllib.parse.urlsplit(url)
-    scheme = (parsed.scheme or "").lower()
-    if scheme not in ("http", "https"):
-        raise ValidationError("metadata JSON contains a prohibited URI scheme")
-    if not parsed.netloc:
+    try:
+        ipaddress.ip_address(hostname)
+        return
+    except ValueError:
+        pass
+    if len(hostname) > 253:
         raise ValidationError("metadata JSON contains a malformed URI")
-    if parsed.username is not None or parsed.password is not None:
-        raise ValidationError("metadata JSON contains a prohibited URI userinfo")
+    if hostname.startswith(".") or hostname.endswith("."):
+        raise ValidationError("metadata JSON contains a malformed URI")
+    labels = hostname.split(".")
+    if not labels:
+        raise ValidationError("metadata JSON contains a malformed URI")
+    for label in labels:
+        if not label or len(label) > 63:
+            raise ValidationError("metadata JSON contains a malformed URI")
+        try:
+            encoded = label.encode("idna").decode("ascii")
+        except (UnicodeError, ValueError):
+            raise ValidationError("metadata JSON contains a malformed URI") from None
+        if not _HOST_LABEL_RE.match(encoded):
+            raise ValidationError("metadata JSON contains a malformed URI")
 
 
 def _validate_http_url_token(token: str) -> None:
@@ -245,13 +258,9 @@ def _validate_http_url_token(token: str) -> None:
     if scheme not in ("http", "https"):
         raise ValidationError("metadata JSON contains a prohibited URI scheme")
     hostname = parsed.hostname
-    if not hostname:
+    if hostname is None:
         raise ValidationError("metadata JSON contains a malformed URI")
-    if all(c in ",.;:!?()[]{}" for c in hostname):
-        raise ValidationError("metadata JSON contains a malformed URI")
-    for char in hostname:
-        if char in " \\\"'`,\t\n\r" or ord(char) < 0x20:
-            raise ValidationError("metadata JSON contains a malformed URI")
+    _validate_public_hostname(hostname)
     try:
         if parsed.port is not None and not (1 <= parsed.port <= 65535):
             raise ValidationError("metadata JSON contains a malformed URI")

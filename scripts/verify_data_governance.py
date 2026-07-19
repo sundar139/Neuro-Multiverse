@@ -589,7 +589,7 @@ def _check_raw_validation_tool() -> list[str]:
         "environment=environment",
         "check=False",
         "runner_error",
-        "_validate_public_url",
+        "_validate_public_hostname",
         "_validate_http_url_token",
         "_validate_residual_text",
         "_validate_metadata_text",
