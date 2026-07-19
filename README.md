@@ -4,11 +4,13 @@ NeuroMultiverse is a preregistered study of analytic variability in resting-stat
 
 ## Study status
 
-The scientific protocol is locked. No results are reported.
+The scientific protocol is locked. No scientific results are reported.
 
-No dataset has been acquired, no preprocessing has been run, no model has been fitted, and no predictive or quality-control outcome has been produced or inspected. This repository currently contains the scientific protocol and its supporting governance documents only.
+A bounded external ds000030 five-subject pilot has been acquired and raw-validated under governance: 22 files, 187,570,603 bytes, 0 validation errors, 139 warnings, 0 ignored. That data lives outside this repository. **No raw or derivative imaging data is committed to Git.**
 
-**No performance claim of any kind exists in this project.** Any number that appears in this repository is a design parameter, a cap, or a rule, never an observed result.
+No preprocessing has been run, no model has been fitted, and no predictive, pipeline-agreement, or quality-control outcome has been produced or inspected.
+
+**No performance claim of any kind exists in this project.** Numbers in this repository are design parameters, caps, rules, or governance and provenance evidence — file counts, byte counts, validation warning counts, hashes, and versions. None of them is a performance or scientific-result claim.
 
 ## Protocol and governance
 

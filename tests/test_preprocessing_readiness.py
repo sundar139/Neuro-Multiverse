@@ -346,6 +346,24 @@ def test_pilot_document_records_the_standing_prohibitions() -> None:
         assert f"## {banned}" not in lowered
 
 
+def test_readme_status_matches_the_accepted_evidence() -> None:
+    """The top-level status must not contradict the accepted pilot evidence."""
+    text = (_REPO_ROOT / "README.md").read_text(encoding="utf-8").lower()
+    for statement in (
+        "the scientific protocol is locked",
+        "no scientific results are reported",
+        "187,570,603 bytes",
+        "0 validation errors, 139 warnings, 0 ignored",
+        "no raw or derivative imaging data is committed to git",
+        "no preprocessing has been run",
+        "no model has been fitted",
+        "quality-control outcome has been produced or inspected",
+        "no performance claim of any kind exists",
+    ):
+        assert statement in text, statement
+    assert "no dataset has been acquired" not in text
+
+
 def test_committed_artifacts_carry_no_participant_or_private_path() -> None:
     for path in (_PILOT_DOC, _QC_CHECKLIST, _PLAN_TEMPLATE, _READINESS_MODULE, _PREFLIGHT):
         text = path.read_text(encoding="utf-8")
