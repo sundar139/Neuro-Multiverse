@@ -571,8 +571,23 @@ def _check_raw_validation_tool() -> list[str]:
         "_docker_group_is_trusted",
         "_group_membership_trusted",
         "_run_trusted_docker",
-        "before != after",
+        "before_cli != after_cli",
+        "before_endpoint != after_endpoint",
         "REVIEWED_DOCKER_FILESYSTEM",
+        'REVIEWED_DOCKER_ENDPOINT = "unix:///var/run/docker.sock"',
+        'REVIEWED_DOCKER_SOCKET_CANONICAL = Path("/run/docker.sock")',
+        'REVIEWED_DOCKER_SERVER_NAME = "docker-desktop"',
+        'REVIEWED_DOCKER_SERVER_OS = "Docker Desktop"',
+        "PROHIBITED_DOCKER_ENV",
+        "_trusted_docker_environment",
+        "_docker_endpoint_identity",
+        "stat.S_ISSOCK",
+        "_path_symlink_chain",
+        "context_endpoint != REVIEWED_DOCKER_ENDPOINT",
+        '"--host"',
+        "environment=environment",
+        "check=False",
+        "runner_error",
     )
     for marker in required_markers:
         if marker not in source:
@@ -584,6 +599,8 @@ def _check_raw_validation_tool() -> list[str]:
         problems.append("raw validation tool contains a forbidden permission-change path")
     if '"blocking_issues": [str(exc)]' in source or '"problem": str(exc)' in source:
         problems.append("raw validation tool exposes raw exception text")
+    if "os.environ.copy(" in source or "dict(os.environ)" in source:
+        problems.append("raw validation tool blindly copies the parent environment")
     if any(path.name == ".bidsignore" for path in REPO_ROOT.rglob(".bidsignore")):
         problems.append("repository contains a forbidden .bidsignore")
     for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
@@ -595,6 +612,31 @@ def _check_raw_validation_tool() -> list[str]:
         )
         if direct_captured and function.name != "_run_trusted_docker":
             problems.append("a production Docker command bypasses the trusted wrapper")
+    wrapper = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_run_trusted_docker"
+    )
+    endpoint_post_lines = [
+        node.lineno
+        for node in ast.walk(wrapper)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "after_endpoint"
+            for target in node.targets
+        )
+    ]
+    returncode_lines = [
+        node.lineno
+        for node in ast.walk(wrapper)
+        if isinstance(node, ast.Attribute) and node.attr == "returncode"
+    ]
+    if (
+        not endpoint_post_lines
+        or not returncode_lines
+        or min(returncode_lines) < min(endpoint_post_lines)
+    ):
+        problems.append("Docker return-code enforcement can precede endpoint post-checks")
     executor = EXECUTOR.read_text(encoding="utf-8")
     for marker in (
         "os.O_WRONLY | os.O_CREAT | os.O_EXCL",

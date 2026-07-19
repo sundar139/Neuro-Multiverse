@@ -52,6 +52,27 @@ def _docker_identity(_asserted: Path | None = None) -> Any:
     )
 
 
+def _docker_endpoint_identity() -> Any:
+    return tool.DockerEndpointIdentity(
+        endpoint=tool.REVIEWED_DOCKER_ENDPOINT,
+        command_path=str(tool.REVIEWED_DOCKER_SOCKET),
+        canonical_path=str(tool.REVIEWED_DOCKER_SOCKET_CANONICAL),
+        symlink_chain=(("/var/run", "/run", 1, 2, 0, 0, 0o777),),
+        device=3,
+        inode=4,
+        uid=tool.REVIEWED_DOCKER_SOCKET_UID,
+        gid=tool.REVIEWED_DOCKER_SOCKET_GID,
+        mode=tool.REVIEWED_DOCKER_SOCKET_MODE,
+        mount_point=str(tool.REVIEWED_DOCKER_SOCKET_MOUNT),
+        mount_source="none",
+        filesystem=tool.REVIEWED_DOCKER_SOCKET_FILESYSTEM,
+    )
+
+
+def _docker_environment() -> dict[str, str]:
+    return {"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
+
+
 def _json(path: Path, value: dict[str, Any]) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
     if os.name != "nt":
@@ -287,8 +308,9 @@ def _validator_result(errors: int = 0, warnings: int = 0) -> str:
 
 def _docker_runner(validator_output: str, returncode: int = 0) -> Any:
     def run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if command[1:3] == ["version", "--format"]:
-            if command[-1].startswith('{"client"'):
+        arguments = command[5:]
+        if arguments[:2] == ["version", "--format"]:
+            if arguments[-1].startswith('{"client"'):
                 backend = {
                     "client": tool.REVIEWED_DOCKER_CLI_VERSION,
                     "server": tool.REVIEWED_DOCKER_ENGINE_VERSION,
@@ -299,11 +321,21 @@ def _docker_runner(validator_output: str, returncode: int = 0) -> Any:
                 }
                 return subprocess.CompletedProcess(command, 0, json.dumps(backend), "")
             return subprocess.CompletedProcess(command, 0, tool.REVIEWED_DOCKER_CLI_VERSION, "")
-        if command[1:] == ["context", "show"]:
-            return subprocess.CompletedProcess(command, 0, tool.REVIEWED_DOCKER_CONTEXT, "")
-        if command[-1] == "info":
+        if arguments[:3] == ["context", "inspect", tool.REVIEWED_DOCKER_CONTEXT]:
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps(tool.REVIEWED_DOCKER_ENDPOINT), ""
+            )
+        if arguments[:2] == ["info", "--format"]:
+            server = {
+                "name": tool.REVIEWED_DOCKER_SERVER_NAME,
+                "operating_system": tool.REVIEWED_DOCKER_SERVER_OS,
+                "architecture": "x86_64",
+                "security_options": ["name=seccomp,profile=builtin", "name=cgroupns"],
+            }
+            return subprocess.CompletedProcess(command, 0, json.dumps(server), "")
+        if arguments == ["info"]:
             return subprocess.CompletedProcess(command, 0, "ok", "")
-        if command[-3:-1] == ["image", "inspect"]:
+        if arguments[-3:-1] == ["image", "inspect"]:
             inspected = [
                 {
                     "RepoDigests": [tool.VALIDATOR_IMAGE],
@@ -320,13 +352,26 @@ def _docker_runner(validator_output: str, returncode: int = 0) -> Any:
 
 
 def _run_validator(*args: Any) -> dict[str, Any]:
-    return cast(dict[str, Any], tool._run_validator(*args, identity_provider=_docker_identity))
+    return cast(
+        dict[str, Any],
+        tool._run_validator(
+            *args,
+            identity_provider=_docker_identity,
+            endpoint_provider=_docker_endpoint_identity,
+            environment_provider=_docker_environment,
+        ),
+    )
 
 
 def _inspect_validator_image(*args: Any) -> dict[str, Any]:
     return cast(
         dict[str, Any],
-        tool._inspect_validator_image(*args, identity_provider=_docker_identity),
+        tool._inspect_validator_image(
+            *args,
+            identity_provider=_docker_identity,
+            endpoint_provider=_docker_endpoint_identity,
+            environment_provider=_docker_environment,
+        ),
     )
 
 
@@ -431,6 +476,63 @@ def _accept_evidence(identity: Any, **changes: Any) -> None:
     tool._validate_docker_evidence(identity, **facts)
 
 
+def _accept_endpoint(identity: Any, **changes: Any) -> None:
+    facts = {
+        "socket_is_socket": True,
+        "replacement_writable": False,
+        "mount_options": frozenset({"rw", "nosuid", "nodev"}),
+        **changes,
+    }
+    tool._validate_endpoint_evidence(identity, **facts)
+
+
+@pytest.mark.parametrize("name", sorted(tool.PROHIBITED_DOCKER_ENV))
+def test_docker_environment_override_is_rejected(name: str) -> None:
+    with pytest.raises(tool.ValidationError, match="environment override"):
+        tool._trusted_docker_environment({name: "synthetic"})
+
+
+def test_docker_environment_is_minimal_and_credential_free() -> None:
+    environment = tool._trusted_docker_environment({"PATH": "/private", "TOKEN": "secret"})
+    assert environment == {"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
+    assert not any(name.startswith("DOCKER_") for name in environment)
+    assert not any(name in environment for name in ("HOME", "PATH", "TOKEN", "SSH_AUTH_SOCK"))
+
+
+def test_reviewed_unix_endpoint_evidence_passes() -> None:
+    _accept_endpoint(_docker_endpoint_identity())
+
+
+@pytest.mark.parametrize(
+    ("changes", "facts", "message"),
+    [
+        ({"endpoint": "tcp://127.0.0.1:2375"}, {}, "endpoint differs"),
+        ({"endpoint": "ssh://host"}, {}, "endpoint differs"),
+        ({"command_path": "/run/other.sock"}, {}, "socket path"),
+        ({"canonical_path": "relative.sock"}, {}, "canonical path"),
+        ({}, {"socket_is_socket": False}, "Unix-domain socket"),
+        ({}, {"replacement_writable": True}, "parent chain"),
+        ({"filesystem": "ext4"}, {}, "mount provenance"),
+        ({"symlink_chain": ()}, {}, "symlink chain"),
+    ],
+)
+def test_endpoint_evidence_fails_closed(
+    changes: dict[str, Any], facts: dict[str, Any], message: str
+) -> None:
+    identity = tool.dataclasses.replace(_docker_endpoint_identity(), **changes)
+    with pytest.raises(tool.ValidationError, match=message):
+        _accept_endpoint(identity, **facts)
+
+
+def test_missing_socket_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    missing = Path("/definitely/missing-docker.sock")
+    monkeypatch.setattr(tool, "REVIEWED_DOCKER_ENDPOINT", "unix:///definitely/missing-docker.sock")
+    monkeypatch.setattr(tool, "REVIEWED_DOCKER_SOCKET", missing)
+    monkeypatch.setattr(tool, "REVIEWED_DOCKER_SOCKET_CANONICAL", missing)
+    with pytest.raises(tool.ValidationError, match="provenance is unavailable"):
+        tool._docker_endpoint_identity()
+
+
 def test_root_owned_755_docker_evidence_passes() -> None:
     _accept_evidence(_trust_evidence(mode=0o755))
 
@@ -500,6 +602,109 @@ def test_docker_change_during_command_is_rejected(field: str) -> None:
             ["info"],
             _docker_runner(_validator_result()),
             identity_provider=lambda _path: next(identities),
+            endpoint_provider=_docker_endpoint_identity,
+            environment_provider=_docker_environment,
+        )
+
+
+@pytest.mark.parametrize(("returncode", "check"), [(0, False), (17, False), (17, True)])
+def test_docker_wrapper_checks_cli_and_endpoint_after_every_exit(
+    returncode: int, check: bool
+) -> None:
+    cli_checks = 0
+    endpoint_checks = 0
+
+    def cli(_path: Path | None) -> Any:
+        nonlocal cli_checks
+        cli_checks += 1
+        return _docker_identity()
+
+    def endpoint() -> Any:
+        nonlocal endpoint_checks
+        endpoint_checks += 1
+        return _docker_endpoint_identity()
+
+    def runner(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert command[1:5] == tool._docker_global_args()
+        assert kwargs["check"] is False
+        assert kwargs["env"] == _docker_environment()
+        return subprocess.CompletedProcess(command, returncode, "", "")
+
+    if check and returncode:
+        with pytest.raises(tool.ValidationError, match="exited unsuccessfully"):
+            tool._run_trusted_docker(
+                Path("/synthetic/docker"),
+                ["info"],
+                runner,
+                check=True,
+                identity_provider=cli,
+                endpoint_provider=endpoint,
+                environment_provider=_docker_environment,
+            )
+    else:
+        result = tool._run_trusted_docker(
+            Path("/synthetic/docker"),
+            ["info"],
+            runner,
+            check=check,
+            identity_provider=cli,
+            endpoint_provider=endpoint,
+            environment_provider=_docker_environment,
+        )
+        assert result.returncode == returncode
+    assert cli_checks == endpoint_checks == 2
+
+
+def test_docker_wrapper_post_checks_after_runner_oserror() -> None:
+    checks = {"cli": 0, "endpoint": 0}
+
+    def cli(_path: Path | None) -> Any:
+        checks["cli"] += 1
+        return _docker_identity()
+
+    def endpoint() -> Any:
+        checks["endpoint"] += 1
+        return _docker_endpoint_identity()
+
+    def failure(_command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise OSError("private path must not escape")
+
+    with pytest.raises(tool.ValidationError, match="execution failed"):
+        tool._run_trusted_docker(
+            Path("/synthetic/docker"),
+            ["info"],
+            failure,
+            identity_provider=cli,
+            endpoint_provider=endpoint,
+            environment_provider=_docker_environment,
+        )
+    assert checks == {"cli": 2, "endpoint": 2}
+
+
+@pytest.mark.parametrize("mutated", ["cli", "endpoint"])
+def test_failed_command_cannot_hide_identity_mutation(mutated: str) -> None:
+    cli_values = [_docker_identity(), _docker_identity()]
+    endpoint_values = [_docker_endpoint_identity(), _docker_endpoint_identity()]
+    if mutated == "cli":
+        cli_values[1] = tool.dataclasses.replace(cli_values[1], digest="0" * 64)
+    else:
+        endpoint_values[1] = tool.dataclasses.replace(endpoint_values[1], inode=999)
+
+    def failed(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 19, "", "")
+
+    expected = (
+        "Docker CLI identity changed" if mutated == "cli" else "Docker endpoint identity changed"
+    )
+    with pytest.raises(tool.ValidationError, match=expected):
+        tool._run_trusted_docker(
+            Path("/synthetic/docker"),
+            ["info"],
+            failed,
+            check=True,
+            identity_provider=lambda _path: cli_values.pop(0),
+            endpoint_provider=lambda: endpoint_values.pop(0),
+            environment_provider=_docker_environment,
         )
 
 
@@ -507,24 +712,70 @@ def test_docker_cli_version_is_pinned() -> None:
     base = _docker_runner(_validator_result())
 
     def updated(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if command[1:3] == ["version", "--format"]:
+        if command[5:7] == ["version", "--format"]:
             return subprocess.CompletedProcess(command, 0, "29.5.4", "")
         return cast(subprocess.CompletedProcess[str], base(command, **kwargs))
 
     with pytest.raises(tool.ValidationError, match="version differs"):
-        tool._verify_docker_cli_version(Path("/synthetic/docker"), updated, _docker_identity)
+        tool._verify_docker_cli_version(
+            Path("/synthetic/docker"),
+            updated,
+            _docker_identity,
+            _docker_endpoint_identity,
+            _docker_environment,
+        )
 
 
 def test_docker_backend_and_context_are_pinned() -> None:
     base = _docker_runner(_validator_result())
 
     def changed_context(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if command[1:] == ["context", "show"]:
-            return subprocess.CompletedProcess(command, 0, "unexpected", "")
+        if command[5:8] == ["context", "inspect", tool.REVIEWED_DOCKER_CONTEXT]:
+            return subprocess.CompletedProcess(command, 0, json.dumps("unix:///run/other.sock"), "")
         return cast(subprocess.CompletedProcess[str], base(command, **kwargs))
 
     with pytest.raises(tool.ValidationError, match="backend provenance differs"):
-        tool._verify_docker_backend(Path("/synthetic/docker"), changed_context, _docker_identity)
+        tool._verify_docker_backend(
+            Path("/synthetic/docker"),
+            changed_context,
+            _docker_identity,
+            _docker_endpoint_identity,
+            _docker_environment,
+        )
+
+
+@pytest.mark.parametrize(
+    ("change", "value"),
+    [
+        ("name", "other-daemon"),
+        ("operating_system", "Other Linux"),
+        ("architecture", "arm64"),
+        ("security_options", ["name=rootless"]),
+    ],
+)
+def test_docker_server_identity_is_pinned(change: str, value: Any) -> None:
+    base = _docker_runner(_validator_result())
+
+    def changed(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if command[5:7] == ["info", "--format"]:
+            server = {
+                "name": tool.REVIEWED_DOCKER_SERVER_NAME,
+                "operating_system": tool.REVIEWED_DOCKER_SERVER_OS,
+                "architecture": "x86_64",
+                "security_options": [],
+            }
+            server[change] = value
+            return subprocess.CompletedProcess(command, 0, json.dumps(server), "")
+        return cast(subprocess.CompletedProcess[str], base(command, **kwargs))
+
+    with pytest.raises(tool.ValidationError, match="backend provenance differs"):
+        tool._verify_docker_backend(
+            Path("/synthetic/docker"),
+            changed,
+            _docker_identity,
+            _docker_endpoint_identity,
+            _docker_environment,
+        )
 
 
 @pytest.mark.parametrize(
@@ -537,9 +788,9 @@ def test_mutable_or_wrong_validator_image_is_rejected(tmp_path: Path, image: str
 
 def test_missing_local_validator_image_is_rejected() -> None:
     def missing(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if command[-1] == "info":
+        if command[5:] == ["info"]:
             return subprocess.CompletedProcess(command, 0, "ok", "")
-        raise subprocess.CalledProcessError(1, command)
+        return subprocess.CompletedProcess(command, 1, "", "missing")
 
     with pytest.raises(tool.ValidationError, match="image is missing"):
         _inspect_validator_image(Path("docker"), tool.VALIDATOR_IMAGE, missing)
@@ -796,6 +1047,8 @@ def test_synthetic_end_to_end_validate_is_read_only(
     output_dir.mkdir(mode=0o700)
     docker = Path("/usr/bin/docker")
     monkeypatch.setattr(tool, "_docker_identity", _docker_identity)
+    monkeypatch.setattr(tool, "_docker_endpoint_identity", _docker_endpoint_identity)
+    monkeypatch.setattr(tool, "_trusted_docker_environment", _docker_environment)
     if os.name != "nt":
         manifest_path.chmod(0o600)
     else:

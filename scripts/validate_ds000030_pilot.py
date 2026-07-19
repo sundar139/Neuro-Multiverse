@@ -15,6 +15,7 @@ import re
 import shutil
 import stat
 import subprocess
+import urllib.parse
 from collections import Counter
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
@@ -55,6 +56,31 @@ REVIEWED_DOCKER_PROVENANCE = "trusted_docker_desktop_wsl_cli"
 REVIEWED_DOCKER_GROUP = "root"
 REVIEWED_DOCKER_MOUNT = Path("/mnt/wsl/docker-desktop/cli-tools")
 REVIEWED_DOCKER_FILESYSTEM = "iso9660"
+REVIEWED_DOCKER_ENDPOINT = "unix:///var/run/docker.sock"
+REVIEWED_DOCKER_SOCKET = Path("/var/run/docker.sock")
+REVIEWED_DOCKER_SOCKET_CANONICAL = Path("/run/docker.sock")
+REVIEWED_DOCKER_SOCKET_UID = 0
+REVIEWED_DOCKER_SOCKET_GID = 1001
+REVIEWED_DOCKER_SOCKET_MODE = 0o660
+REVIEWED_DOCKER_SOCKET_MOUNT = Path("/run")
+REVIEWED_DOCKER_SOCKET_FILESYSTEM = "tmpfs"
+REVIEWED_DOCKER_SERVER_NAME = "docker-desktop"
+REVIEWED_DOCKER_SERVER_OS = "Docker Desktop"
+REVIEWED_DOCKER_CONFIG = Path("/run/neuromultiverse-empty-docker-config")
+DOCKER_ENVIRONMENT_POLICY_VERSION = "1"
+PROHIBITED_DOCKER_ENV = frozenset(
+    {
+        "DOCKER_API_VERSION",
+        "DOCKER_CERT_PATH",
+        "DOCKER_CONFIG",
+        "DOCKER_CONTEXT",
+        "DOCKER_CUSTOM_HEADERS",
+        "DOCKER_DEFAULT_PLATFORM",
+        "DOCKER_HOST",
+        "DOCKER_TLS",
+        "DOCKER_TLS_VERIFY",
+    }
+)
 ERROR_CATEGORIES = frozenset(
     {
         "runtime_unsupported",
@@ -125,6 +151,24 @@ class DockerCliIdentity:
     size: int
     mtime_ns: int
     digest: str
+    mount_point: str
+    mount_source: str
+    filesystem: str
+
+
+@dataclasses.dataclass(frozen=True)
+class DockerEndpointIdentity:
+    """Local endpoint identity compared around each Docker subprocess."""
+
+    endpoint: str
+    command_path: str
+    canonical_path: str
+    symlink_chain: tuple[tuple[str, str, int, int, int, int, int], ...]
+    device: int
+    inode: int
+    uid: int
+    gid: int
+    mode: int
     mount_point: str
     mount_source: str
     filesystem: str
@@ -600,6 +644,119 @@ def _mount_provenance(path: Path) -> tuple[str, str, str, frozenset[str]]:
     return best
 
 
+def _path_symlink_chain(path: Path) -> tuple[tuple[str, str, int, int, int, int, int], ...]:
+    chain: list[tuple[str, str, int, int, int, int, int]] = []
+    for index in range(1, len(path.parts) + 1):
+        component = Path(*path.parts[:index])
+        info = component.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            chain.append(
+                (
+                    str(component),
+                    str(component.readlink()),
+                    info.st_dev,
+                    info.st_ino,
+                    info.st_uid,
+                    info.st_gid,
+                    stat.S_IMODE(info.st_mode),
+                )
+            )
+    return tuple(chain)
+
+
+def _trusted_docker_environment(parent: dict[str, str] | None = None) -> dict[str, str]:
+    source = os.environ if parent is None else parent
+    if any(name.startswith("DOCKER_") for name in source):
+        raise ValidationError("prohibited Docker environment override is present")
+    return {"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
+
+
+def _docker_global_args() -> list[str]:
+    return [
+        "--config",
+        str(REVIEWED_DOCKER_CONFIG),
+        "--host",
+        REVIEWED_DOCKER_ENDPOINT,
+    ]
+
+
+def _validate_endpoint_evidence(
+    identity: DockerEndpointIdentity,
+    *,
+    socket_is_socket: bool,
+    replacement_writable: bool,
+    mount_options: frozenset[str],
+) -> None:
+    if identity.endpoint != REVIEWED_DOCKER_ENDPOINT:
+        raise ValidationError("Docker endpoint differs from reviewed evidence")
+    if Path(identity.command_path) != REVIEWED_DOCKER_SOCKET:
+        raise ValidationError("Docker socket path differs from reviewed evidence")
+    if Path(identity.canonical_path) != REVIEWED_DOCKER_SOCKET_CANONICAL:
+        raise ValidationError("Docker socket canonical path differs from reviewed evidence")
+    if not socket_is_socket:
+        raise ValidationError("Docker endpoint is not a Unix-domain socket")
+    reviewed_links = tuple(
+        (path, target, uid, gid, mode)
+        for path, target, _device, _inode, uid, gid, mode in identity.symlink_chain
+    )
+    if reviewed_links != (("/var/run", "/run", 0, 0, 0o777),):
+        raise ValidationError("Docker socket symlink chain differs from reviewed evidence")
+    if (identity.uid, identity.gid, identity.mode) != (
+        REVIEWED_DOCKER_SOCKET_UID,
+        REVIEWED_DOCKER_SOCKET_GID,
+        REVIEWED_DOCKER_SOCKET_MODE,
+    ):
+        raise ValidationError("Docker socket ownership or mode differs from reviewed evidence")
+    if replacement_writable:
+        raise ValidationError("Docker socket can be replaced through its parent chain")
+    if (
+        Path(identity.mount_point) != REVIEWED_DOCKER_SOCKET_MOUNT
+        or identity.filesystem != REVIEWED_DOCKER_SOCKET_FILESYSTEM
+        or identity.mount_source != "none"
+        or not {"rw", "nosuid", "nodev"}.issubset(mount_options)
+    ):
+        raise ValidationError("Docker socket mount provenance differs from reviewed evidence")
+
+
+def _docker_endpoint_identity() -> DockerEndpointIdentity:
+    parsed = urllib.parse.urlsplit(REVIEWED_DOCKER_ENDPOINT)
+    if parsed.scheme != "unix" or parsed.netloc or not parsed.path.startswith("/"):
+        raise ValidationError("reviewed Docker endpoint is not an absolute Unix endpoint")
+    repository = Path(__file__).resolve().parents[1]
+    home = Path.home().resolve()
+    command = Path(parsed.path)
+    try:
+        canonical = command.resolve(strict=True)
+        info = canonical.stat()
+        symlinks = _path_symlink_chain(command)
+    except OSError as exc:
+        raise ValidationError("Docker endpoint provenance is unavailable") from exc
+    if repository in canonical.parents or home in canonical.parents:
+        raise ValidationError("Docker endpoint resolves inside a private mutable path")
+    mount_point, mount_source, filesystem, options = _mount_provenance(canonical)
+    identity = DockerEndpointIdentity(
+        endpoint=REVIEWED_DOCKER_ENDPOINT,
+        command_path=str(command),
+        canonical_path=str(canonical),
+        symlink_chain=symlinks,
+        device=info.st_dev,
+        inode=info.st_ino,
+        uid=info.st_uid,
+        gid=info.st_gid,
+        mode=stat.S_IMODE(info.st_mode),
+        mount_point=mount_point,
+        mount_source=mount_source,
+        filesystem=filesystem,
+    )
+    _validate_endpoint_evidence(
+        identity,
+        socket_is_socket=stat.S_ISSOCK(info.st_mode),
+        replacement_writable=_replacement_writable(command) or _replacement_writable(canonical),
+        mount_options=options,
+    )
+    return identity
+
+
 def _docker_group_is_trusted(gid: int) -> bool:
     try:
         import grp
@@ -730,12 +887,19 @@ def _trusted_docker(asserted: Path | None = None) -> Path:
 
 
 def _run_captured(
-    runner: CommandRunner, command: Sequence[str], *, check: bool = False
+    runner: CommandRunner, command: Sequence[str], *, environment: dict[str, str]
 ) -> subprocess.CompletedProcess[str]:
-    return runner(list(command), text=True, capture_output=True, check=check)
+    return runner(
+        list(command),
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
 
 
 DockerIdentityProvider = Callable[[Path | None], DockerCliIdentity]
+DockerEndpointProvider = Callable[[], DockerEndpointIdentity]
 
 
 def _run_trusted_docker(
@@ -745,13 +909,36 @@ def _run_trusted_docker(
     *,
     check: bool = False,
     identity_provider: DockerIdentityProvider | None = None,
+    endpoint_provider: DockerEndpointProvider | None = None,
+    environment_provider: Callable[[], dict[str, str]] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     identity_provider = identity_provider or _docker_identity
-    before = identity_provider(docker)
-    result = _run_captured(runner, [str(docker), *arguments], check=check)
-    after = identity_provider(docker)
-    if before != after:
+    endpoint_provider = endpoint_provider or _docker_endpoint_identity
+    environment_provider = environment_provider or _trusted_docker_environment
+    environment = environment_provider()
+    if environment != {"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}:
+        raise ValidationError("Docker subprocess environment differs from trusted policy")
+    before_cli = identity_provider(docker)
+    before_endpoint = endpoint_provider()
+    command = [str(docker), *_docker_global_args(), *arguments]
+    result: subprocess.CompletedProcess[str] | None = None
+    runner_error: BaseException | None = None
+    try:
+        result = _run_captured(runner, command, environment=environment)
+    except Exception as exc:  # post-checks must run even after runner failure
+        runner_error = exc
+    after_cli = identity_provider(docker)
+    after_endpoint = endpoint_provider()
+    if before_cli != after_cli:
         raise ValidationError("Docker CLI identity changed during command execution")
+    if before_endpoint != after_endpoint:
+        raise ValidationError("Docker endpoint identity changed during command execution")
+    if runner_error is not None:
+        raise ValidationError("Docker command execution failed") from runner_error
+    if result is None:  # pragma: no cover - defensive invariant
+        raise ValidationError("Docker command produced no result")
+    if check and result.returncode != 0:
+        raise ValidationError("Docker command exited unsuccessfully")
     return result
 
 
@@ -759,18 +946,21 @@ def _verify_docker_cli_version(
     docker: Path,
     runner: CommandRunner,
     identity_provider: DockerIdentityProvider | None = None,
+    endpoint_provider: DockerEndpointProvider | None = None,
+    environment_provider: Callable[[], dict[str, str]] | None = None,
 ) -> None:
     try:
         result = _run_trusted_docker(
             docker,
             ["version", "--format", "{{.Client.Version}}"],
             runner,
-            check=True,
             identity_provider=identity_provider,
+            endpoint_provider=endpoint_provider,
+            environment_provider=environment_provider,
         )
     except subprocess.SubprocessError as exc:
         raise ValidationError("Docker CLI version is unavailable") from exc
-    if result.stdout.strip() != REVIEWED_DOCKER_CLI_VERSION:
+    if result.returncode != 0 or result.stdout.strip() != REVIEWED_DOCKER_CLI_VERSION:
         raise ValidationError("Docker CLI version differs from reviewed evidence")
 
 
@@ -778,6 +968,8 @@ def _verify_docker_backend(
     docker: Path,
     runner: CommandRunner,
     identity_provider: DockerIdentityProvider | None = None,
+    endpoint_provider: DockerEndpointProvider | None = None,
+    environment_provider: Callable[[], dict[str, str]] | None = None,
 ) -> None:
     template = (
         '{"client":"{{.Client.Version}}","server":"{{.Server.Version}}",'
@@ -789,21 +981,48 @@ def _verify_docker_backend(
             docker,
             ["version", "--format", template],
             runner,
-            check=True,
             identity_provider=identity_provider,
+            endpoint_provider=endpoint_provider,
+            environment_provider=environment_provider,
         )
         context = _run_trusted_docker(
             docker,
-            ["context", "show"],
+            [
+                "context",
+                "inspect",
+                REVIEWED_DOCKER_CONTEXT,
+                "--format",
+                "{{json .Endpoints.docker.Host}}",
+            ],
             runner,
-            check=True,
             identity_provider=identity_provider,
+            endpoint_provider=endpoint_provider,
+            environment_provider=environment_provider,
+        )
+        info = _run_trusted_docker(
+            docker,
+            [
+                "info",
+                "--format",
+                '{"name":{{json .Name}},"operating_system":{{json .OperatingSystem}},'
+                '"architecture":{{json .Architecture}},'
+                '"security_options":{{json .SecurityOptions}}}',
+            ],
+            runner,
+            identity_provider=identity_provider,
+            endpoint_provider=endpoint_provider,
+            environment_provider=environment_provider,
         )
         details = json.loads(version.stdout)
+        context_endpoint = json.loads(context.stdout)
+        server = json.loads(info.stdout)
     except (json.JSONDecodeError, subprocess.SubprocessError) as exc:
         raise ValidationError("Docker backend provenance is unavailable") from exc
     if (
-        details
+        version.returncode != 0
+        or context.returncode != 0
+        or info.returncode != 0
+        or details
         != {
             "client": REVIEWED_DOCKER_CLI_VERSION,
             "server": REVIEWED_DOCKER_ENGINE_VERSION,
@@ -812,7 +1031,12 @@ def _verify_docker_backend(
             "os": "linux",
             "arch": VALIDATOR_ARCHITECTURE,
         }
-        or context.stdout.strip() != REVIEWED_DOCKER_CONTEXT
+        or context_endpoint != REVIEWED_DOCKER_ENDPOINT
+        or server.get("name") != REVIEWED_DOCKER_SERVER_NAME
+        or server.get("operating_system") != REVIEWED_DOCKER_SERVER_OS
+        or server.get("architecture") != "x86_64"
+        or not isinstance(server.get("security_options"), list)
+        or any("rootless" in str(value).casefold() for value in server["security_options"])
     ):
         raise ValidationError("Docker backend provenance differs from reviewed evidence")
 
@@ -822,25 +1046,37 @@ def _inspect_validator_image(
     image: str,
     runner: CommandRunner,
     identity_provider: DockerIdentityProvider | None = None,
+    endpoint_provider: DockerEndpointProvider | None = None,
+    environment_provider: Callable[[], dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     if image != VALIDATOR_IMAGE or "@sha256:" not in image or image.endswith(":latest"):
         raise ValidationError("validator image is not the exact pinned digest")
     try:
-        _run_trusted_docker(
-            docker, ["info"], runner, check=True, identity_provider=identity_provider
+        info_result = _run_trusted_docker(
+            docker,
+            ["info"],
+            runner,
+            identity_provider=identity_provider,
+            endpoint_provider=endpoint_provider,
+            environment_provider=environment_provider,
         )
     except subprocess.SubprocessError as exc:
         raise ValidationError("Docker daemon is unavailable") from exc
+    if info_result.returncode != 0:
+        raise ValidationError("Docker daemon is unavailable")
     try:
         result = _run_trusted_docker(
             docker,
             ["image", "inspect", image],
             runner,
-            check=True,
             identity_provider=identity_provider,
+            endpoint_provider=endpoint_provider,
+            environment_provider=environment_provider,
         )
     except subprocess.SubprocessError as exc:
         raise ValidationError("validator image is missing") from exc
+    if result.returncode != 0:
+        raise ValidationError("validator image is missing")
     try:
         inspected = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
@@ -943,16 +1179,31 @@ def _run_validator(
     output_path: Path,
     runner: CommandRunner = subprocess.run,
     identity_provider: DockerIdentityProvider | None = None,
+    endpoint_provider: DockerEndpointProvider | None = None,
+    environment_provider: Callable[[], dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    _verify_docker_cli_version(docker, runner, identity_provider)
-    _verify_docker_backend(docker, runner, identity_provider)
-    _inspect_validator_image(docker, image, runner, identity_provider)
+    _verify_docker_cli_version(
+        docker, runner, identity_provider, endpoint_provider, environment_provider
+    )
+    _verify_docker_backend(
+        docker, runner, identity_provider, endpoint_provider, environment_provider
+    )
+    _inspect_validator_image(
+        docker,
+        image,
+        runner,
+        identity_provider,
+        endpoint_provider,
+        environment_provider,
+    )
     base_policy = _docker_base_policy_args()
     version_result = _run_trusted_docker(
         docker,
         [*base_policy, image, "--version"],
         runner,
         identity_provider=identity_provider,
+        endpoint_provider=endpoint_provider,
+        environment_provider=environment_provider,
     )
     if version_result.returncode != 0:
         raise ValidationError("BIDS Validator version differs from the pinned version")
@@ -964,6 +1215,8 @@ def _run_validator(
         [*dataset_policy, image, "/data", "--format", "json"],
         runner,
         identity_provider=identity_provider,
+        endpoint_provider=endpoint_provider,
+        environment_provider=environment_provider,
     )
     completed = _utc_now()
     fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
