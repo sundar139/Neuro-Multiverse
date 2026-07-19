@@ -224,6 +224,63 @@ def _validate_public_url(url: str) -> None:
         raise ValidationError("metadata JSON contains a prohibited URI userinfo")
 
 
+def _validate_http_url_token(token: str) -> None:
+    """Validate a matched HTTP(S) token as a complete, safe URI.
+
+    Recognises only http and https, requires a valid nonempty hostname,
+    validates ports, and rejects backslashes, control characters, user
+    information, nested URI schemes, and embedded drive paths.
+    """
+    if SECRET_RE.search(token):
+        raise ValidationError("metadata JSON contains prohibited secret or credential material")
+    if "\x00" in token or any(ord(char) < 0x20 for char in token):
+        raise ValidationError("metadata JSON contains a malformed URI")
+    if "\\" in token:
+        raise ValidationError("metadata JSON contains a malformed URI")
+    try:
+        parsed = urllib.parse.urlsplit(token)
+    except ValueError:
+        raise ValidationError("metadata JSON contains a malformed URI") from None
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise ValidationError("metadata JSON contains a prohibited URI scheme")
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValidationError("metadata JSON contains a malformed URI")
+    if all(c in ",.;:!?()[]{}" for c in hostname):
+        raise ValidationError("metadata JSON contains a malformed URI")
+    for char in hostname:
+        if char in " \\\"'`,\t\n\r" or ord(char) < 0x20:
+            raise ValidationError("metadata JSON contains a malformed URI")
+    try:
+        if parsed.port is not None and not (1 <= parsed.port <= 65535):
+            raise ValidationError("metadata JSON contains a malformed URI")
+    except ValueError:
+        raise ValidationError("metadata JSON contains a malformed URI") from None
+    netloc = parsed.netloc
+    if "[" in netloc and "]" in netloc:
+        after_bracket = netloc.split("]")[-1]
+        if after_bracket.startswith(":"):
+            port_str = after_bracket[1:]
+            if port_str and not port_str.isdigit():
+                raise ValidationError("metadata JSON contains a malformed URI")
+    elif ":" in netloc:
+        _, _, port_part = netloc.rpartition(":")
+        if port_part and not port_part.isdigit():
+            raise ValidationError("metadata JSON contains a malformed URI")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValidationError("metadata JSON contains a prohibited URI userinfo")
+    remaining = (parsed.path or "") + "?" + (parsed.query or "") + "#" + (parsed.fragment or "")
+    if re.search(r"(?i)(file:|https?://|://)", remaining):
+        raise ValidationError("metadata JSON contains a prohibited URI scheme or path")
+    path = parsed.path or ""
+    if re.search(r"(?i)/[a-z]:[/\\]", path):
+        raise ValidationError("metadata JSON contains a prohibited private-path reference")
+    for comp in (parsed.query, parsed.fragment):
+        if comp and re.search(r"(?i)[a-z]:[/\\]", comp):
+            raise ValidationError("metadata JSON contains a prohibited private-path reference")
+
+
 def _validate_residual_text(text: str) -> None:
     """Reject remaining local paths, file URIs, and non-HTTP(S) schemes."""
     if RESIDUAL_FORBIDDEN_RE.search(text):
@@ -237,10 +294,20 @@ def _validate_metadata_text(text: str) -> None:
     parts: list[str] = []
     last = 0
     for match in URL_RE.finditer(text):
-        url = match.group(0).rstrip(".,);:]\"'")
-        _validate_public_url(url)
+        raw = match.group(0)
+        stripped = raw.rstrip(".,);:\"]'")
+        suffix = raw[len(stripped) :]
+        if suffix:
+            for char in suffix:
+                if char not in ".,);:\"'":
+                    raise ValidationError(
+                        "metadata JSON contains concatenated or malformed URL tokens"
+                    )
+        _validate_http_url_token(stripped)
         parts.append(text[last : match.start()])
         parts.append(" ")
+        if suffix:
+            parts.append(suffix)
         last = match.end()
     parts.append(text[last:])
     _validate_residual_text("".join(parts))

@@ -1284,3 +1284,80 @@ def test_authorization_param_url_fails(tmp_path: Path) -> None:
 
 def test_token_param_url_fails(tmp_path: Path) -> None:
     _assert_strict_raises(tmp_path, {"Link": "https://example.com/?token=1"})
+
+
+# Adversarial URL-token boundary tests: nested local schemes, drive paths,
+# malformed hosts and ports, backslashes, and concatenated URLs must fail
+# closed. Legitimate remote /home/ and /Users/ path segments must pass.
+
+
+def test_https_with_embedded_windows_backslash_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(
+        tmp_path, {"Link": "https://example.invalid/C:\\Users\\synthetic\\private.txt"}
+    )
+
+
+def test_https_with_embedded_backslash_before_path_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(
+        tmp_path, {"Link": "https://example.invalid\\C:\\Users\\synthetic\\private.txt"}
+    )
+
+
+def test_https_with_embedded_windows_drive_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(
+        tmp_path, {"Link": "https://example.invalid/C:/Users/synthetic/private.txt"}
+    )
+
+
+def test_https_with_nested_file_scheme_in_path_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(
+        tmp_path, {"Link": "https://example.invalid/file:///home/synthetic/private.txt"}
+    )
+
+
+def test_https_with_nested_file_scheme_in_query_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(
+        tmp_path, {"Link": "https://example.invalid?next=file:///home/synthetic/private.txt"}
+    )
+
+
+def test_https_with_nested_file_scheme_in_fragment_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(
+        tmp_path, {"Link": "https://example.invalid#file:///home/synthetic/private.txt"}
+    )
+
+
+def test_https_with_nested_https_in_path_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://example.invalid/https://second.invalid"})
+
+
+def test_https_with_nested_https_in_query_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://example.invalid?next=https://second.invalid"})
+
+
+def test_https_invalid_port_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://example.invalid:bad/reference"})
+
+
+def test_https_colon_only_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://:"})
+
+
+def test_https_comma_host_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://,"})
+
+
+def test_https_backslash_in_url_fails(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://example.invalid\\private"})
+
+
+def test_concatenated_urls_fail(tmp_path: Path) -> None:
+    _assert_strict_raises(tmp_path, {"Link": "https://a.invalid,https://b.invalid"})
+
+
+def test_remote_home_path_passes(tmp_path: Path) -> None:
+    _assert_strict_passes(tmp_path, {"Link": "https://example.invalid/home/reference"})
+
+
+def test_remote_users_path_passes(tmp_path: Path) -> None:
+    _assert_strict_passes(tmp_path, {"Link": "https://example.invalid/Users/guide"})

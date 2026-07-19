@@ -34,6 +34,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
 import tempfile
 from datetime import date
@@ -589,6 +590,7 @@ def _check_raw_validation_tool() -> list[str]:
         "check=False",
         "runner_error",
         "_validate_public_url",
+        "_validate_http_url_token",
         "_validate_residual_text",
         "_validate_metadata_text",
         "https?://",
@@ -671,6 +673,88 @@ def _check_raw_validation_tool() -> list[str]:
     ):
         if marker not in executor:
             problems.append(f"acquisition executor lacks secure raw creation marker: {marker}")
+    return problems
+
+
+def _check_url_classifier_behavior() -> list[str]:
+    """Offline synthetic assertions for the metadata URL classifier.
+
+    Loads the validation module without touching real data or Docker and
+    verifies the HTTP(S) URL token classifier closes known fail-open
+    boundaries while accepting legitimate public references.
+    """
+    problems: list[str] = []
+    path = REPO_ROOT / "scripts" / "validate_ds000030_pilot.py"
+    if not path.exists():
+        problems.append("raw validation tool is missing for behavioral check")
+        return problems
+    import importlib.util as _util
+    import sys as _sys
+
+    _modname = "_validate_url_behavior"
+    spec = _util.spec_from_file_location(_modname, path)
+    if spec is None or spec.loader is None:
+        problems.append("cannot load the raw validation tool for behavioral check")
+        return problems
+    mod = _util.module_from_spec(spec)
+    _sys.modules[_modname] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as exc:
+        problems.append(f"cannot import the raw validation tool for behavioral check: {exc}")
+        return problems
+
+    must_pass = (
+        "https://openfmri.org/example",
+        "https://www.nature.com/articles/example",
+        "https://f1000research.com/articles/example",
+        "https://example.invalid/home/reference",
+        "https://example.invalid/Users/guide",
+        "See https://one.invalid/reference and https://two.invalid/reference.",
+    )
+    must_fail = (
+        r"https://example.invalid/C:\Users\synthetic\private.txt",
+        r"https://example.invalid\C:\Users\synthetic\private.txt",
+        "https://example.invalid/C:/Users/synthetic/private.txt",
+        "https://example.invalid/file:///home/synthetic/private.txt",
+        "https://example.invalid?next=file:///home/synthetic/private.txt",
+        "https://example.invalid#file:///home/synthetic/private.txt",
+        "https://example.invalid/https://second.invalid",
+        "https://example.invalid?next=https://second.invalid",
+        "https://example.invalid:bad/reference",
+        "https://:",
+        "https://,",
+        "https://example.invalid\\private",
+        "https://a.invalid,https://b.invalid",
+    )
+
+    for text in must_pass:
+        try:
+            mod._validate_metadata_text(text)
+        except mod.ValidationError:
+            problems.append(f"URL classifier incorrectly rejects: {text!r}")
+
+    for text in must_fail:
+        try:
+            mod._validate_metadata_text(text)
+            problems.append(f"URL classifier incorrectly accepts: {text!r}")
+        except mod.ValidationError:
+            pass
+
+    for text in must_fail:
+        wrapped = json.dumps({"url": text})
+        fd, tf_path_str = tempfile.mkstemp(suffix=".json")
+        tf_path = Path(tf_path_str)
+        os.close(fd)
+        try:
+            tf_path.write_text(wrapped, encoding="utf-8")
+            mod._strict_json(tf_path)
+            problems.append(f"strict_json incorrectly accepts: {text!r}")
+        except mod.ValidationError:
+            pass
+        finally:
+            tf_path.unlink(missing_ok=True)
+
     return problems
 
 
@@ -849,6 +933,7 @@ def check(records: list[DatasetAccessRecord]) -> list[str]:
     problems.extend(_check_no_selected_identifiers())
     problems.extend(_check_executor_hardening())
     problems.extend(_check_raw_validation_tool())
+    problems.extend(_check_url_classifier_behavior())
     problems.extend(_check_citation_dois())
     problems.extend(_check_false_attribution())
     problems.extend(_check_manual_actions(records))
